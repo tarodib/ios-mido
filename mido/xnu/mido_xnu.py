@@ -101,7 +101,7 @@ edit('makedefs/MakeInc.def',
      '# panicked on `ldadd` in lck_grp_reference (843 LSE sites in 517 functions).\n'
      '# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).\n'
      '# MIDO_CPU_ARMV8_0: for files that do not include the board header (commpage_asm.s).\n'
-     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM -DMIDO_CPU_ARMV8_0   -mcpu=cortex-a53+crc+crypto\n')
+     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM -DMIDO_CPU_ARMV8_0 -DMIDO_BOARD -mcpu=cortex-a53+crc+crypto\n')
 
 # First boot on the phone (build #2): XNU drew its stage-0 band, then hung
 # silently at the first kernel-VA access after the MMU came on. With 4K pages
@@ -613,6 +613,584 @@ edit('osfmk/vm/vm_compressor.c',
      '\tif (vm_compression_limit == 0 && compressor_pool_size > 4ULL * max_mem) {\n'
      '\t\tcompressor_pool_size = 4ULL * max_mem;\n'
      '\t}\n'
+     '#endif\n')
+
+# ---------------------------------------------------------------------------
+# sleh.c: EL0 emulation of ARMv8.1 LSE atomics. Cortex-A53 is ARMv8.0; the
+# iOS 16 userland (A11 build) has ~860 inline LSE sites in libdispatch,
+# libsystem_pthread/platform/malloc and dyld. They trap as uncategorized.
+# With cpus=1 nothing else runs while interrupts are off, so the RMW is done
+# directly on the user VA after AT S1E0W proved it is mapped writable (no PAN
+# on MIDO); otherwise the page is faulted in for write and the check repeats.
+# ---------------------------------------------------------------------------
+MIDO_LSE = r'''
+#if defined(MIDO_CPU_ARMV8_0)
+static uint64_t mido_lse_count;
+
+static inline uint64_t
+mido_ureg(arm_saved_state_t *s, unsigned r)
+{
+	return r == 31 ? 0 : (uint64_t)get_saved_state_reg(s, r);
+}
+
+static inline void
+mido_set_ureg(arm_saved_state_t *s, unsigned r, uint64_t v)
+{
+	if (r != 31) {
+		set_saved_state_reg(s, r, (register_t)v);
+	}
+}
+
+static inline bool
+mido_user_writable(uint64_t va)
+{
+	uint64_t par;
+	__asm__ volatile ("at s1e0w, %1\n\tisb\n\tmrs %0, par_el1" : "=r"(par) : "r"(va) : "memory");
+	return (par & 1) == 0;
+}
+
+static inline uint64_t
+mido_ld(uint64_t va, unsigned sz)
+{
+	switch (sz) {
+	case 0: return *(volatile uint8_t *)va;
+	case 1: return *(volatile uint16_t *)va;
+	case 2: return *(volatile uint32_t *)va;
+	default: return *(volatile uint64_t *)va;
+	}
+}
+
+static inline void
+mido_st(uint64_t va, unsigned sz, uint64_t v)
+{
+	switch (sz) {
+	case 0: *(volatile uint8_t *)va = (uint8_t)v; break;
+	case 1: *(volatile uint16_t *)va = (uint16_t)v; break;
+	case 2: *(volatile uint32_t *)va = (uint32_t)v; break;
+	default: *(volatile uint64_t *)va = v; break;
+	}
+}
+
+static inline uint64_t
+mido_trunc(uint64_t v, unsigned sz)
+{
+	return sz == 3 ? v : v & ((1ULL << (8u << sz)) - 1);
+}
+
+static inline int64_t
+mido_sext(uint64_t v, unsigned sz)
+{
+	unsigned sh = 64 - (8u << sz);
+	return (int64_t)(v << sh) >> sh;
+}
+
+/* Returns true if insn was an LSE atomic and has been emulated (PC advanced). */
+static bool
+mido_emulate_lse(arm_saved_state_t *state, uint32_t insn)
+{
+	unsigned kind, sz, op = 0, bytes;
+	unsigned rs = (insn >> 16) & 31, rn = (insn >> 5) & 31, rt = insn & 31;
+
+	if ((insn & 0x3F200C00) == 0x38200000) {               /* LD<op>, SWP */
+		unsigned o3 = (insn >> 15) & 1, opc = (insn >> 12) & 7;
+		if (o3 && opc != 0) {
+			return false;                           /* LDAPR (v8.3) and reserved */
+		}
+		kind = 0; sz = insn >> 30; op = o3 ? 8 : opc; bytes = 1u << sz;
+	} else if ((insn & 0x3FA07C00) == 0x08A07C00) {        /* CAS{A,L,AL}{B,H,} */
+		kind = 1; sz = insn >> 30; bytes = 1u << sz;
+	} else if ((insn & 0xBFA07C00) == 0x08207C00) {        /* CASP{A,L,AL} */
+		if ((rs & 1) || (rt & 1)) {
+			return false;
+		}
+		kind = 2; sz = 2 + ((insn >> 30) & 1); bytes = 2u << sz;
+	} else {
+		return false;
+	}
+
+	uint64_t va = rn == 31 ? (uint64_t)get_saved_state_sp(state) : (uint64_t)get_saved_state_reg(state, rn);
+	va = tbi_clear(va);
+	vm_map_t map = current_map();
+	if ((va & (bytes - 1)) || va < vm_map_min(map) || va + bytes > vm_map_max(map)) {
+		return false;
+	}
+
+	for (int tries = 0; tries < 8; tries++) {
+		boolean_t istate = ml_set_interrupts_enabled(FALSE);
+		if (mido_user_writable(va)) {
+			uint64_t a = mido_ureg(state, rs), old, nv = 0;
+			__builtin_arm_dmb(0xb);
+			if (kind == 0) {
+				old = mido_ld(va, sz);
+				switch (op) {
+				case 0: nv = old + a; break;
+				case 1: nv = old & ~a; break;
+				case 2: nv = old ^ a; break;
+				case 3: nv = old | a; break;
+				case 4: nv = mido_sext(old, sz) > mido_sext(a, sz) ? old : a; break;
+				case 5: nv = mido_sext(old, sz) < mido_sext(a, sz) ? old : a; break;
+				case 6: nv = old > mido_trunc(a, sz) ? old : a; break;
+				case 7: nv = old < mido_trunc(a, sz) ? old : a; break;
+				default: nv = a; break;                 /* SWP */
+				}
+				mido_st(va, sz, nv);
+				mido_set_ureg(state, rt, old);
+			} else if (kind == 1) {
+				old = mido_ld(va, sz);
+				if (old == mido_trunc(a, sz)) {
+					mido_st(va, sz, mido_ureg(state, rt));
+				}
+				mido_set_ureg(state, rs, old);
+			} else {
+				unsigned half = bytes / 2;
+				uint64_t a1 = mido_ureg(state, rs + 1);
+				uint64_t o0 = mido_ld(va, sz), o1 = mido_ld(va + half, sz);
+				if (o0 == mido_trunc(a, sz) && o1 == mido_trunc(a1, sz)) {
+					mido_st(va, sz, mido_ureg(state, rt));
+					mido_st(va + half, sz, mido_ureg(state, rt + 1));
+				}
+				mido_set_ureg(state, rs, o0);
+				mido_set_ureg(state, rs + 1, o1);
+			}
+			__builtin_arm_dmb(0xb);
+			add_saved_state_pc(state, 4);
+			ml_set_interrupts_enabled(istate);
+			if (mido_lse_count++ == 0) {
+				printf("MIDO LSE: emulating ARMv8.1 atomics for EL0 (first: %08x)\n", insn);
+			}
+			return true;
+		}
+		ml_set_interrupts_enabled(istate);
+		vm_map_offset_t page = vm_map_trunc_page(va, PAGE_MASK);
+		if (arm_fast_fault(map->pmap, page, VM_PROT_READ | VM_PROT_WRITE, FALSE, TRUE) != KERN_SUCCESS) {
+			kern_return_t kr = vm_fault(map, page, VM_PROT_READ | VM_PROT_WRITE,
+			    FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE, NULL, 0);
+			if (kr != KERN_SUCCESS && kr != KERN_ABORTED) {
+				return false;
+			}
+		}
+	}
+	return false;
+}
+#endif /* MIDO_CPU_ARMV8_0 */
+
+static void
+handle_uncategorized(arm_saved_state_t *state)
+{
+'''
+edit('osfmk/arm64/sleh.c',
+     '\nstatic void\nhandle_uncategorized(arm_saved_state_t *state)\n{\n',
+     MIDO_LSE)
+edit('osfmk/arm64/sleh.c',
+     '\tCOPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));\n'
+     '\n'
+     '#if CONFIG_DTRACE\n',
+     '\tCOPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));\n'
+     '\n'
+     '#if defined(MIDO_CPU_ARMV8_0)\n'
+     '\tif (PSR64_IS_USER64(get_saved_state_cpsr(state)) && mido_emulate_lse(state, instr)) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '#endif\n'
+     '\n'
+     '#if CONFIG_DTRACE\n')
+
+# ---------------------------------------------------------------------------
+# sweet_ufs.c: eMMC transport for MIDO. Same driver above the transport
+# (ufsroot0/rufsroot0, rd=ufsroot0, ufsrw=1 write guard, 4 MiB persistent
+# console log at the end of the partition); below it, SDHCI PIO on the card
+# the shim left selected (RCA 2, transfer state, sector addressing).
+# The driver's 4 KiB "device blocks" are 8 eMMC sectors.
+# ---------------------------------------------------------------------------
+MIDO_EMMC = r'''
+#if defined(MIDO_BOARD)
+/*
+ * MIDO: eMMC on SDHCI-MSM SDHC1 (vendor core 0x07824000, SDHCI at +0x900).
+ * The mido shim re-identified the card (CMD0..CMD7, RCA 2) and left it in
+ * the transfer state at 25 MHz, 1-bit bus, sector addressing. Polled PIO
+ * through the buffer data port; CMD18/CMD25 with auto-CMD12 for multi-block.
+ */
+#define MIDO_SDHC_PAGE  0x07824000UL
+#define MIDO_HC         0x900u
+#define M_BLK           0x04
+#define M_ARG           0x08
+#define M_XFER          0x0c
+#define M_RESP0         0x10
+#define M_BUF           0x20
+#define M_PRES          0x24
+#define M_CLK           0x2c
+#define M_STS           0x30
+#define MS_CMD_DONE     (1u << 0)
+#define MS_XFER_DONE    (1u << 1)
+#define MS_ERR          (1u << 15)
+#define MP_WR_EN        (1u << 10)
+#define MP_RD_EN        (1u << 11)
+#define MR_NONE         0x00u
+#define MR_R1           0x1au
+#define MR_R1B          0x1bu
+#define MIDO_RCA        2u
+#define MIDO_SECT       512u
+#define MIDO_SPB        (UFS_BLOCK / MIDO_SECT)  /* sectors per driver block */
+#define MIDO_CHUNK      256u                     /* sectors per command */
+
+static uint32_t mido_resp;
+
+static inline uint32_t
+mh_rd(uint32_t o)
+{
+	return *(volatile uint32_t *)(su.regs + MIDO_HC + o);
+}
+
+static inline void
+mh_wr(uint32_t o, uint32_t v)
+{
+	*(volatile uint32_t *)(su.regs + MIDO_HC + o) = v;
+}
+
+static uint64_t
+mido_deadline(uint64_t ms)
+{
+	uint64_t d;
+	nanoseconds_to_absolutetime(ms * NSEC_PER_MSEC, &d);
+	return mach_absolute_time() + d;
+}
+
+static void
+mido_reset_lines(void)
+{
+	mh_wr(M_CLK, mh_rd(M_CLK) | (0x06u << 24));      /* reset CMD + DAT */
+	uint64_t end = mido_deadline(100);
+	while (((mh_rd(M_CLK) >> 24) & 0x06) && mach_absolute_time() < end) {
+	}
+	mh_wr(M_STS, 0xffffffff);
+}
+
+/* Wait for a status bit (or error); 0 on timeout. */
+static uint32_t
+mido_wait_sts(uint32_t mask, uint64_t ms)
+{
+	uint64_t end = mido_deadline(ms);
+	do {
+		uint32_t s = mh_rd(M_STS);
+		if (s & (mask | MS_ERR)) {
+			return s;
+		}
+	} while (mach_absolute_time() < end);
+	return 0;
+}
+
+/* One command, nblk 512-byte sectors of PIO data through buf. dir: 0, -1 read, 1 write. */
+static int
+mido_cmd(uint32_t idx, uint32_t arg, uint32_t rsp, int dir, uint32_t nblk, uint32_t *buf)
+{
+	uint64_t end = mido_deadline(1000);
+	while (mh_rd(M_PRES) & ((dir || rsp == MR_R1B) ? 3u : 1u)) {
+		if (mach_absolute_time() > end) {
+			printf("MIDO EMMC: CMD%u: lines busy (pres 0x%x)\n", idx, mh_rd(M_PRES));
+			mido_reset_lines();
+			return EBUSY;
+		}
+	}
+	mh_wr(M_STS, 0xffffffff);
+	uint32_t xfer = 0, c = (idx << 8) | rsp;
+	if (dir) {
+		mh_wr(M_BLK, (nblk << 16) | MIDO_SECT);
+		xfer = (1u << 1) | (dir < 0 ? (1u << 4) : 0);   /* block count enable, read */
+		if (nblk > 1) {
+			xfer |= (1u << 5) | (1u << 2);           /* multi-block, auto-CMD12 */
+		}
+		c |= 0x20;                                       /* data present */
+	}
+	mh_wr(M_ARG, arg);
+	mh_wr(M_XFER, (c << 16) | xfer);
+
+	uint32_t s = mido_wait_sts(MS_CMD_DONE, 1000);
+	if (!s || (s & MS_ERR)) {
+		printf("MIDO EMMC: CMD%u arg 0x%x: %s (sts 0x%08x)\n", idx, arg,
+		    s ? "error" : "timeout", s);
+		mido_reset_lines();
+		return s ? EIO : ETIMEDOUT;
+	}
+	mido_resp = mh_rd(M_RESP0);
+	mh_wr(M_STS, MS_CMD_DONE);
+
+	for (uint32_t b = 0; dir && b < nblk; b++) {
+		uint32_t ready = dir < 0 ? MP_RD_EN : MP_WR_EN;
+		uint64_t bend = mido_deadline(1000);
+		for (;;) {
+			s = mh_rd(M_STS);
+			if (s & MS_ERR) {
+				break;
+			}
+			if (mh_rd(M_PRES) & ready) {
+				break;
+			}
+			if (mach_absolute_time() > bend) {
+				s = MS_ERR;
+				break;
+			}
+		}
+		if (s & MS_ERR) {
+			printf("MIDO EMMC: CMD%u block %u/%u: data %s (sts 0x%08x)\n", idx, b, nblk,
+			    (s >> 16) ? "error" : "timeout", s);
+			mido_reset_lines();
+			return EIO;
+		}
+		mh_wr(M_STS, (1u << 4) | (1u << 5));             /* buffer read/write ready */
+		uint32_t *p = buf + b * (MIDO_SECT / 4);
+		if (dir < 0) {
+			for (unsigned i = 0; i < MIDO_SECT / 4; i++) {
+				p[i] = mh_rd(M_BUF);
+			}
+		} else {
+			for (unsigned i = 0; i < MIDO_SECT / 4; i++) {
+				mh_wr(M_BUF, p[i]);
+			}
+		}
+	}
+	if (dir || rsp == MR_R1B) {
+		s = mido_wait_sts(MS_XFER_DONE, 5000);
+		if (!s || (s & MS_ERR)) {
+			printf("MIDO EMMC: CMD%u: transfer %s (sts 0x%08x)\n", idx,
+			    s ? "error" : "timeout", s);
+			mido_reset_lines();
+			return s ? EIO : ETIMEDOUT;
+		}
+	}
+	mh_wr(M_STS, 0xffffffff);
+	return 0;
+}
+
+/* CMD13 until the card is in transfer state and ready for data. */
+static int
+mido_card_ready(uint64_t ms)
+{
+	uint64_t end = mido_deadline(ms);
+	do {
+		int e = mido_cmd(13, MIDO_RCA << 16, MR_R1, 0, 0, NULL);
+		if (e) {
+			return e;
+		}
+		if (((mido_resp >> 9) & 0xf) == 4 && (mido_resp & (1u << 8))) {
+			return 0;
+		}
+	} while (mach_absolute_time() < end);
+	printf("MIDO EMMC: card not ready (status 0x%x)\n", mido_resp);
+	return ETIMEDOUT;
+}
+
+/* nsec sectors at sector into / from the bounce buffer. */
+static int
+mido_xfer(uint64_t sector, uint32_t nsec, bool write)
+{
+	uint32_t *buf = (uint32_t *)(su.dma + DMA_BOUNCE);
+	if (nsec > BOUNCE_SIZE / MIDO_SECT || sector + nsec > (1ULL << 32)) {
+		return EINVAL;
+	}
+	for (uint32_t done = 0; done < nsec;) {
+		uint32_t n = MIN(nsec - done, MIDO_CHUNK);
+		uint32_t idx = write ? (n > 1 ? 25 : 24) : (n > 1 ? 18 : 17);
+		int e = mido_cmd(idx, (uint32_t)(sector + done), MR_R1, write ? 1 : -1, n,
+		    buf + done * (MIDO_SECT / 4));
+		if (!e && write) {
+			e = mido_card_ready(2000);
+		}
+		if (e) {
+			return e;
+		}
+		done += n;
+	}
+	return 0;
+}
+
+static int
+mido_read_blocks(uint64_t lba, uint32_t count)
+{
+	if (count > BOUNCE_SIZE / UFS_BLOCK) {
+		return EINVAL;
+	}
+	return mido_xfer(lba * MIDO_SPB, count * MIDO_SPB, false);
+}
+
+/* Only called from ufs_write_blocks after its partition bounds check. */
+static int
+mido_write_blocks(uint64_t lba, uint32_t count)
+{
+	return mido_xfer(lba * MIDO_SPB, count * MIDO_SPB, true);
+}
+
+static int
+mido_sync_cache(void)
+{
+	static bool warned;
+	/* SWITCH (write byte) EXT_CSD[32] FLUSH_CACHE = 1; harmless with the cache off. */
+	int e = mido_cmd(6, (3u << 24) | (32u << 16) | (1u << 8), MR_R1B, 0, 0, NULL);
+	if (!e) {
+		e = mido_card_ready(2000);
+	}
+	if (e && !warned) {
+		warned = true;
+		printf("MIDO EMMC: cache flush failed (%d), ignoring\n", e);
+	}
+	return 0;
+}
+
+static int
+mido_take_over(void)
+{
+	int e = mido_card_ready(500);
+	if (e) {
+		printf("MIDO EMMC: card not in transfer state after the shim (%d)\n", e);
+		return ENXIO;
+	}
+	return 0;
+}
+
+static int
+mido_find_partition(const char *want)
+{
+	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	int error = mido_xfer(1, 1, false);
+	if (error) {
+		return error;
+	}
+	if (memcmp(b, "EFI PART", 8) != 0) {
+		printf("MIDO EMMC: no GPT\n");
+		return ENXIO;
+	}
+	uint64_t entry_lba;
+	uint32_t nent, esz;
+	memcpy(&entry_lba, b + 72, 8);
+	memcpy(&nent, b + 80, 4);
+	memcpy(&esz, b + 84, 4);
+	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
+		printf("MIDO EMMC: unsupported GPT entries %u x %u\n", nent, esz);
+		return ENXIO;
+	}
+	error = mido_xfer(entry_lba, (nent * esz + MIDO_SECT - 1) / MIDO_SECT, false);
+	if (error) {
+		return error;
+	}
+	for (uint32_t i = 0; i < nent; i++) {
+		const uint8_t *e = b + i * esz;
+		char name[37];
+		unsigned c;
+		for (c = 0; c < 36; c++) {
+			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
+			if (ch == 0 || ch > 0x7f) {
+				break;
+			}
+			name[c] = (char)ch;
+		}
+		name[c] = 0;
+		if (strcmp(name, want) != 0) {
+			continue;
+		}
+		uint64_t first, last;
+		memcpy(&first, e + 32, 8);
+		memcpy(&last, e + 40, 8);
+		if (last < first || (first % MIDO_SPB)) {
+			printf("MIDO EMMC: \"%s\" sectors 0x%llx-0x%llx not 4 KiB aligned\n", want, first, last);
+			return ENXIO;
+		}
+		su.first_block = first / MIDO_SPB;
+		su.nblocks = (last - first + 1) / MIDO_SPB;
+		return 0;
+	}
+	printf("MIDO EMMC: no GPT partition named \"%s\"\n", want);
+	return ENOENT;
+}
+#endif /* MIDO_BOARD */
+'''
+UFS = 'bsd/dev/sweet_ufs.c'
+edit(UFS,
+     'static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);\n',
+     'static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);\n' + MIDO_EMMC)
+# The UFS-only helpers are unused on MIDO.
+edit(UFS, 'static void\ndma_sync(', 'static void __unused\ndma_sync(')
+edit(UFS, 'static void\ndma_clean(', 'static void __unused\ndma_clean(')
+edit(UFS, 'static int\nufs_scsi(const uint8_t *cdb', 'static int __unused\nufs_scsi(const uint8_t *cdb')
+# read
+edit(UFS,
+     'ufs_read_blocks(uint64_t lba, uint32_t count)\n{\n',
+     'ufs_read_blocks(uint64_t lba, uint32_t count)\n{\n'
+     '#if defined(MIDO_BOARD)\n\treturn mido_read_blocks(lba, count);\n#else\n')
+edit(UFS,
+     '\treturn ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);\n}\n',
+     '\treturn ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);\n#endif\n}\n')
+# write (after the partition bounds check, which stays)
+edit(UFS,
+     '\tuint8_t cdb[10] = {\n\t\t0x2a, 0,\n',
+     '#if defined(MIDO_BOARD)\n\treturn mido_write_blocks(lba, count);\n#else\n'
+     '\tuint8_t cdb[10] = {\n\t\t0x2a, 0,\n')
+edit(UFS,
+     '\treturn ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);\n}\n',
+     '\treturn ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);\n#endif\n}\n')
+# sync
+edit(UFS,
+     '\tstatic const uint8_t cdb[10] = { 0x35 };       /* SYNCHRONIZE CACHE(10), whole LUN */\n'
+     '\treturn ufs_scsi(cdb, sizeof(cdb), 0, false);\n',
+     '#if defined(MIDO_BOARD)\n\treturn mido_sync_cache();\n#else\n'
+     '\tstatic const uint8_t cdb[10] = { 0x35 };       /* SYNCHRONIZE CACHE(10), whole LUN */\n'
+     '\treturn ufs_scsi(cdb, sizeof(cdb), 0, false);\n#endif\n')
+# GPT
+edit(UFS,
+     'ufs_find_partition(const char *want)\n{\n',
+     'ufs_find_partition(const char *want)\n{\n'
+     '#if defined(MIDO_BOARD)\n\treturn mido_find_partition(want);\n#else\n')
+edit(UFS,
+     '\tprintf("SWEET UFS: no GPT partition named \\"%s\\"\\n", want);\n\treturn ENOENT;\n}\n',
+     '\tprintf("SWEET UFS: no GPT partition named \\"%s\\"\\n", want);\n\treturn ENOENT;\n#endif\n}\n')
+# host take-over
+edit(UFS,
+     'ufs_take_over_host(void)\n{\n',
+     'ufs_take_over_host(void)\n{\n'
+     '#if defined(MIDO_BOARD)\n\treturn mido_take_over();\n#else\n')
+edit(UFS,
+     '\t\tprintf("SWEET UFS: host did not take our request list\\n");\n'
+     '\t\treturn EIO;\n\t}\n\treturn 0;\n}\n',
+     '\t\tprintf("SWEET UFS: host did not take our request list\\n");\n'
+     '\t\treturn EIO;\n\t}\n\treturn 0;\n#endif\n}\n')
+# init: no /sweet-ufs node, fixed SDHC address, no SCSI TEST UNIT READY
+edit(UFS,
+     '\tif (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\t(void)node;\n\t(void)reg;\n\t(void)size;\n'
+     '\tif (0) {\n'
+     '#else\n'
+     '\tif (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||\n')
+edit(UFS,
+     '\t    size < 2 * sizeof(uintptr_t)) {\n'
+     '\t\tprintf("SWEET UFS: no /sweet-ufs node in the device tree\\n");\n',
+     '\t    size < 2 * sizeof(uintptr_t)) {\n'
+     '#endif\n'
+     '\t\tprintf("SWEET UFS: no /sweet-ufs node in the device tree\\n");\n')
+edit(UFS,
+     '\tsu.regs = ml_io_map(reg[0], reg[1]);\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\tsu.regs = ml_io_map(MIDO_SDHC_PAGE, 0x1000);\n'
+     '#else\n'
+     '\tsu.regs = ml_io_map(reg[0], reg[1]);\n'
+     '#endif\n')
+edit(UFS,
+     '\tif (!error) {\n'
+     '\t\tstatic const uint8_t tur[6] = { 0x00 };\n',
+     '#if !defined(MIDO_BOARD)\n'
+     '\tif (!error) {\n'
+     '\t\tstatic const uint8_t tur[6] = { 0x00 };\n')
+edit(UFS,
+     '\t\tfor (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {\n'
+     '\t\t}\n'
+     '\t}\n',
+     '\t\tfor (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {\n'
+     '\t\t}\n'
+     '\t}\n'
+     '#endif\n')
+# The SD730 button/touch/USB drivers poke sweet-only hardware.
+edit(UFS,
+     '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n',
+     '#if !defined(MIDO_BOARD)\n'
+     '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n'
      '#endif\n')
 
 if failures:

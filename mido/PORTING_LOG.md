@@ -337,6 +337,48 @@ NOT backed up: userdata (personal data — user to save it).
   - Fix: under MIDO_4K_VM cap the pool at 4 x max_mem (6 GB) unless the vm_compression_limit
     boot-arg is set. Fixed claims are about 31 GB, leaving about 15 GB for the ptr/sprayqtn/data
     ranges. → build #10.
+- XNU boot #6 (build #10, run 42185899233, commit 2d158d1): **VM, zalloc and IOKit up.** The claim
+  table prints sanely: kmem_data_range 10G, kmem_ptr_range 3939M, kmem_ptr_range_meta 752K,
+  kmem_large_ranges[4] 655M and [5] 9G. vm_compressor_mode 4. The zone_init maps are VM 3684M,
+  RO 1228M, GEN0-3 3684M each, DATA 4912M, metadata 24M, bits 4496K. Then, in order:
+  - "VM bootstrap done: 85 maps".
+  - firehose, oslog, "iBoot version: mido-shim".
+  - AMFI built-in, vnguard, "trust caches unavailable".
+  - "SWEET: starting device-tree platform expert".
+  - AKS, WDT, IOSurfaceRoot, HID buttons and touch, static battery fallback.
+  - `SWEET FB: AppleCLCD 1080x1920 stride 4320 at 0x90001000, default surface 1, presented as
+    1125x2436`. The 1125x2436 comes from ios-sweet patch 0061 (iPhone X size), to revisit.
+  - Nothing after that. With no `rd=` boot-arg, IOFindBSDRoot waits on IOKit for a root disk
+    and none exists yet. This should be **M2: waiting for root device** (to confirm with
+    "Still waiting for root device" on screen).
+  - Next: an eMMC root driver for XNU (bsd/dev/mido_emmc.c, modelled on ios-sweet's sweet_ufs.c and
+    the shim's sdhc.c), selected with `rd=emmcroot0`.
+- Build #11 adds **userland prerequisites**, both MIDO-only in mido_xnu.py. MakeInc gets a new
+  `-DMIDO_BOARD` flag, since sweet_ufs.c doesn't include SWEET.h.
+  1. **eMMC transport under ios-sweet's sweet_ufs.c.** This is not a separate driver: everything
+     above the transport stays, i.e. `rd=ufsroot0`, the `ufsrw=1` guard, the partition-bounds
+     check in ufs_write_blocks, and the 4 MiB console log ring at the end of `userdata`
+     (sweet-log-pull.sh works unchanged). Below it, SDHCI PIO goes through the buffer data port
+     on the card the shim left selected (RCA 2, transfer state, 25 MHz, 1-bit):
+     - CMD17/18 and CMD24/25 with auto-CMD12, 256 sectors per command, and a CMD13 ready poll
+       after writes.
+     - Sync is CMD6 FLUSH_CACHE; errors are logged once and ignored.
+     - The GPT is read in 512-byte sectors, and the partition must be 4 KiB aligned. The
+       driver's 4 KiB blocks are 8 sectors.
+     - The SD730-only sweet_keys/touch/usb start-up is skipped.
+  2. **EL0 LSE emulator** in sleh.c handle_uncategorized, which runs right after the instruction
+     is copied in.
+     - It decodes LD{ADD,CLR,EOR,SET,SMAX,SMIN,UMAX,UMIN} and SWP (mask 0x3F200C00 =
+       0x38200000, excluding LDAPR), CAS (0x3FA07C00 = 0x08A07C00) and CASP (0xBFA07C00 =
+       0x08207C00), in all sizes and A/L variants. Rt/Rs 31 = XZR, Rn 31 = SP, TBI cleared.
+     - Unaligned access, or an address outside the map, falls back to SIGILL.
+     - With interrupts off (cpus=1, so nothing else can run), it checks `AT S1E0W` and does
+       the RMW directly at EL1 (no PAN on MIDO), with dmb ish around it. If the check fails
+       it re-enables interrupts, runs arm_fast_fault and then vm_fault(RW), and retries up to
+       8 times.
+     - It prints "MIDO LSE: emulating ..." once.
+     - **SMP limitation:** this isn't atomic against other cores, so userland must stay on
+       cpus=1 until there is an IPI-based stop-the-world or a per-core scheme.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

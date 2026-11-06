@@ -866,3 +866,21 @@ on the phone. What it took after stage 2 (in order of discovery):
   maybe a bit faster". Boot is bound by the CPU and the PIO transport, not the bus clock.
 - Next: a user-space submit interface (msm-style BO + submit + fence) for Mesa freedreno,
   then Mesa in backboardd behind an EAGL shim, then a GPU present path for the display.
+
+### GPU step 2: user-space submission works (2026-11-06, night)
+- Kernel: MidoGPU IOService + user client (commit after b163ddb, CI run 42299844836):
+  GetParam / BONew / BOFree / Submit / Wait / Log; BOs from the 16 KB-page pool at
+  0x99400000.., mapped write-combined via clientMemoryForType; submission = IB + CCU colour
+  flush + CACHE_FLUSH_TS fence into the 16 KB ring (word wrap).
+- User side: mido/tools/midogpu-test.c (built + ad-hoc signed by the xnu workflow),
+  installed with mido/tools/wsl-add-gpu-test.sh (binary in /usr/local/bin, job added to
+  /System/Library/xpc/launchd.plist by add-launchd-job.py). Root image
+  rootimg/ios16-root-gpu.simg flashed to userdata (user approved; 500 s, 24/24 OKAY).
+- Boot shim-boot-gpu2.img: "MIDO GPU USER: midogpu-test: opened MidoGPU, chip id 05000600",
+  BOs 0x99400000/0x99440000/0x99480000 mapped at 0x100504000.., "submit fence 1 signalled,
+  65536 of 65536 pixels match -> USER-SPACE GPU SUBMISSION WORKS".
+- That first boot of the fresh root sat on the second Apple logo when the user stopped it
+  (log tick 180, SpringBoard/backboardd alive, the usual bluetoothd/fairplayd restarts);
+  run27's first boot needed tick ~216. Probably just the slow first boot; recheck.
+- Next: Mesa freedreno for iOS on top of this interface (libdrm-msm style shim), then
+  backboardd/CoreAnimation through an EAGL replacement, then GPU present.

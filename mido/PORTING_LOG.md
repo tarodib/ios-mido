@@ -598,6 +598,13 @@ NOT backed up: userdata (personal data — user to save it).
     AppleCLCD and the 1242x2208 → 1080x1920 CPU downsampling works. **Milestone M3 (Apple logo).**
   - Numbering note: from here on, builds are referred to by GitHub run number (#22 = what this
     log called build #19; earlier failed/unacquired runs and reruns also count).
+  - Photo: white Apple logo, horizontally centred, at ~40% of the screen height (slightly
+    high; to check the vertical mapping). Then a black screen with the backlight on, then the Apple
+    logo again (a backboardd/SpringBoard restart during first boot), then:
+  - **THE iOS 16 LOCK SCREEN** (user report): clock and date, full battery icon, "iPhone"
+    carrier text at the top left. **Milestone M4 (lock screen).** The clock shows **red**, so
+    a possible R/B channel swap needs checking against a photo. Touch and buttons are not
+    wired for mido yet.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

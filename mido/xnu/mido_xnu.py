@@ -1301,6 +1301,37 @@ edit('osfmk/arm/arm_init.c',
      '\t\tif (args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
      '#endif\n')
 
+# ---------------------------------------------------------------------------
+# CPU driver: build #15's heartbeat backtrace showed kernel_bootstrap_thread
+# asleep in ml_wait_max_cpus() (from vm_set_restrictions). ml_set_max_cpus() is
+# called by SweetCPU::startAll, but SweetCPU never started: its personality
+# matches 'qcom,kryo470' and the mido ADT CPU nodes are 'arm,cortex-a53'.
+# Its MPIDR check also assumes sweet's layout (Aff0 = 0); mido is 0x000-0x003
+# (cluster 0) and 0x100-0x103 (cluster 1).
+# ---------------------------------------------------------------------------
+edit('iokit/KernelConfigTables.cpp',
+     "    \"     'IONameMatch'     = 'qcom,kryo470';\"\n",
+     '#if defined(MIDO_BOARD)\n'
+     "    \"     'IONameMatch'     = 'arm,cortex-a53';\"\n"
+     '#else\n'
+     "    \"     'IONameMatch'     = 'qcom,kryo470';\"\n"
+     '#endif\n')
+edit('iokit/Kernel/arm/SweetCPU.cpp',
+     '\tif (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||\n',
+     '#if defined(MIDO)\n'
+     '\t/* MSM8953: 2 clusters x 4 Cortex-A53, MPIDR Aff1 = cluster, Aff0 = core */\n'
+     '\tif ((cpu->phys_id & ~0x103u) != 0 ||\n'
+     '#else\n'
+     '\tif (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||\n'
+     '#endif\n')
+edit('iokit/Kernel/arm/SweetCPU.cpp',
+     '\tcpuName = OSSymbol::withCStringNoCopy("Kryo 470");\n',
+     '#if defined(MIDO)\n'
+     '\tcpuName = OSSymbol::withCStringNoCopy("Cortex-A53");\n'
+     '#else\n'
+     '\tcpuName = OSSymbol::withCStringNoCopy("Kryo 470");\n'
+     '#endif\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

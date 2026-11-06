@@ -447,6 +447,26 @@ NOT backed up: userdata (personal data — user to save it).
     - from tick 3 on, the heartbeat prints the bootstrap thread's state, wait_event and saved lr,
       plus a frame-pointer backtrace from its kernel context (kstackptr →
       thread_kernel_state.machine.ss), bounded to its kernel stack. Symbolize it with kscan.py.
+  - Build #14 failed to compile: struct thread_kernel_state was redefined, because startup.c
+    already includes that header and it has no #define guard. Build #15 (6785c0a) dropped the
+    include.
+- XNU boot #10 (build #15, run 42195525974): "KB: PE_lockdown_iokit done", no "KB: bsd_init".
+  - Ticks show `MIDO boot thread: state 0x9 wait 0xfffffff007c39dcc lr fffffff0074329e0`.
+    0x9 = TH_WAIT|TH_UNINT.
+  - kscan backtrace: machine_switch_context ← thread_invoke ← thread_block_reason ← lck_mtx_sleep
+    ← **ml_wait_max_cpus** ← vm_set_restrictions (static, shown as itoa+0x1e0) ←
+    kernel_bootstrap_thread+0x650.
+  - No "SWEET CPU:" line on screen at all. ml_set_max_cpus is only called by SweetCPU::startAll,
+    after every selected CPU passed initCPU and a self-SGI. **SweetCPU never matched**: its
+    KernelConfigTables personality is `IONameMatch 'qcom,kryo470'`, and our CPU nodes are
+    `arm,cortex-a53`.
+  - Its start() would also have panicked on mido's MPIDRs, since it requires Aff0 = 0 and mido
+    has 0x000-0x003 / 0x100-0x103.
+  - Fix (build #16), all under MIDO:
+    - IONameMatch 'arm,cortex-a53';
+    - MPIDR check `(phys_id & ~0x103) == 0`;
+    - cpuName "Cortex-A53".
+    The SGI is already redirected to mido_gic_send_sgi (GICv2 GICD_SGIR).
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

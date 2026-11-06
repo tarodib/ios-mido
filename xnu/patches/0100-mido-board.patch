@@ -483,10 +483,35 @@ index bb2a2bf..3ce66f1 100644
  #else
  #define bsd_init_kprintf(x, ...)
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
-index 2545cf9..e00e1b6 100644
+index 2545cf9..9099496 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -206,9 +206,18 @@ SweetCPU::initCPU(bool boot)
+@@ -74,7 +74,12 @@ SweetCPU::start(IOService *provider)
+ 		return false;
+ 	}
+ 	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++#if defined(MIDO)
++	/* MSM8953: 2 clusters x 4 Cortex-A53, MPIDR Aff1 = cluster, Aff0 = core */
++	if ((cpu->phys_id & ~0x103u) != 0 ||
++#else
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
++#endif
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+@@ -82,7 +87,11 @@ SweetCPU::start(IOService *provider)
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
++#if defined(MIDO)
++	cpuName = OSSymbol::withCStringNoCopy("Cortex-A53");
++#else
+ 	cpuName = OSSymbol::withCStringNoCopy("Kryo 470");
++#endif
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+@@ -206,9 +215,18 @@ SweetCPU::initCPU(bool boot)
  	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
  }
  
@@ -505,6 +530,22 @@ index 2545cf9..e00e1b6 100644
  	const ml_topology_info_t *topology = ml_get_topology_info();
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 92f3e26..1c8b494 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -44,7 +44,11 @@ const char * gIOKernelConfigTables =
+     "   {"
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
++#if defined(MIDO_BOARD)
++    "     'IONameMatch'     = 'arm,cortex-a53';"
++#else
+     "     'IONameMatch'     = 'qcom,kryo470';"
++#endif
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
 index 69b13f9..6086ed9 100644
 --- a/makedefs/MakeInc.def

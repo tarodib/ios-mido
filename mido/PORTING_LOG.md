@@ -265,6 +265,53 @@ NOT backed up: userdata (personal data — user to save it).
   Patch with marks: +291/−7, `git apply --check` OK.
 - User forced the phone back to fastboot (Power + Vol-Down) after the first attempt.
 
+### XNU boot #2 (build #3, run 42152446197, link 0xfffffff007004000)
+- payload: virt_base 0xfffffff006000000, entry 0xfffffff00740b488, kernel_end 0xfffffff008448000.
+- **User report: `SWEET EARLY` 1, 2, 3, 4 on screen, then
+  `panic: undefined kernel instruction: pc=0xfffffff0072b1c18 instr=b8280028 @sleh.c:951`.**
+  → start.s, MMU enable, return to arm_init (C) and the early console/panic path all work.
+- `mido/tools/kscan.py` (Mach-O symbol table + LSE scan): pc = `_lck_grp_reference+0x8`;
+  b8280028 = `ldadd w8, w8, [x1]`. Kernel code has **843 LSE instructions in 517 functions**
+  (pmap_ro_zone_atomic_op_internal, pset_update_processor_state, os_ref_release_internal, ...).
+- Root cause: `-march=armv8-a+crc+crypto` IS on all 1102 compile lines, but `-arch arm64
+  -mmacosx-version-min=15.0` makes Apple clang default the *target CPU* to an Apple core, whose
+  features (LSE, RCpc, FP16, ...) `-march` does not remove.
+- Fix (commit a9a15a9): `-mcpu=cortex-a53+crc+crypto`. Also includes the start.s MIDO_MARK 1–6
+  squares. Build #4: run 42153729707. Check after build: kscan.py must report 0 LSE.
+- Build #4 **failed to compile** — the real ARMv8.0 target now rejects v8.1 features (good):
+  - `Invalid register name "pan"` (copyio.c, pcb.c, platform_tests.c): PAN is ARMv8.1, A53 lacks it →
+    `__ARM_PAN_AVAILABLE__` only when !MIDO.
+  - `commpage_asm.s:276/326: instruction requires: lse`: the PFZ `pfz_trylock_and_enqueue/dequeue`
+    routines (commpage text, mapped into every process) use `casa`. MIDO: LDAXR/STXR loop, expected
+    0 / new 1, w12/w13 scratch (x9–x15 allowed), old value in w10, clrex on the held path.
+  - Patch +326/−9 (11 files). Commit 0fe06f7, build #5: run 42154918199.
+- Build #5 **failed only in commpage_asm.s** (PAN fix worked; everything else compiled): the `#else`
+  `casa` branch was assembled because commpage_asm.s does not include SWEET.h → `MIDO` undefined.
+  Fix (commit 9525aee): MACHINE_FLAGS adds `-DMIDO_CPU_ARMV8_0`; the PFZ replacement tests that.
+  Lesson: MIDO-only code in files that don't include the board header must use a command-line flag.
+  Build #6: run 42156033508 → **compiled**.
+- kscan.py on build #6: LSE **843 → 12**: 11 in `firehose_*` (os_log kernel side) + 1 false
+  positive (`K256` = SHA-256 constants inside __TEXT_EXEC). Not booted (firehose runs from early boot).
+- firehose comes from `libfirehose_kernel`, built by xcodebuild from libdispatch (not xnu make), so it
+  never saw MACHINE_FLAGS; macOS SDK default arm64 CPU = Apple core → LSE.
+- Fix (commit d21f54f): `mido/ci/patch_dxb.py` (exact, count-checked) replaces the workflow sed:
+  libfirehose_kernel → `ARCHS="arm64" VALID_ARCHS="arm64" OTHER_CFLAGS='$(inherited) -mcpu=cortex-a53+crc+crypto'`.
+  Build #7: run 42157054345. Boot only if kscan.py shows 0 real LSE.
+- Build #7 compiled; **kscan.py: only `K256` (data) left → 0 real LSE in kernel code.**
+  payload: virt_base 0xfffffff006000000, entry 0xfffffff007424488, kernel_end 0xfffffff0084a4000.
+- XNU boot #3 (build #7): shim jumped (no return to fastboot in 120 s). Rerun gave the same. **First real
+  XNU console output**: "Darwin Kernel Version 22.6.0 ... xnu-8796.141.3", pmap_startup done
+  (95402 free pages, 2758 wired), VM bootstrap OK, then
+  `panic: kmem_range_init: vm_map_locate_space failing for claim zones @vm_kern.c:3645`, followed by
+  nested panics. The 'iBoot didn't extract panic log' line is expected because there's no iBoot.
+  - Cause: SWEET is built as an `XNU_PLATFORM_MacOSX` kernel, so zalloc asks for a 128 GB zone map
+    (ZONE_MAP_VA_SIZE). Without ARM_LARGE_MEMORY (not possible with the 4K/39-bit VA) the kernel map is
+    0xffffffe000000000..0xfffffffbffffffff = 112 GB, so the claim can't fit. ios-sweet fits it in the
+    2 TB large-memory layout.
+  - Fix (mido_xnu.py): under MIDO_4K_VM use the iOS sizes (ZONE_MAP_VA_SIZE 24 GB, ZONE_MAP_MAX 8 GB).
+    This also cuts zone metadata VA from 512 MB to 96 MB at 4K pages. The other claims (ptr, data,
+    sprayqtn) are sized from the remaining free space. → build #8.
+
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.
 - `tools/isa-scan.py`: v1 scanned whole executable mappings → ~190k "LSE" hits, almost all

@@ -518,6 +518,16 @@ edit('osfmk/arm64/arm_vm_init.c',
      '\tsweet_early_relocate(SWEET_EARLY_FB_VA);\n'
      '#endif\n')
 
+# zalloc: the macOS zone map is 128 GB of VA. With 4K pages and no
+# ARM_LARGE_MEMORY the whole kernel map is 0xffffffe000000000..0xfffffffbffffffff
+# (112 GB), so kmem_range_init panicked "vm_map_locate_space failing for claim
+# zones" (boot of build #7). Use the iOS sizes; mido has 2 GB of RAM.
+edit('osfmk/kern/zalloc.c',
+     '#if XNU_PLATFORM_MacOSX\n'
+     '#define ZONE_MAP_MAX            (32ULL << 30)\n',
+     '#if XNU_PLATFORM_MacOSX && !defined(MIDO_4K_VM)\n'
+     '#define ZONE_MAP_MAX            (32ULL << 30)\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

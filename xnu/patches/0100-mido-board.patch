@@ -54,6 +54,54 @@ index 69b13f9..2ac4739 100644
  
  
  CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
+diff --git a/osfmk/arm/commpage/commpage_asm.s b/osfmk/arm/commpage/commpage_asm.s
+index da0bbba..ca8d03f 100644
+--- a/osfmk/arm/commpage/commpage_asm.s
++++ b/osfmk/arm/commpage/commpage_asm.s
+@@ -273,7 +273,21 @@ _pfz_trylock_and_enqueue:
+ 	mov		w11, #1			 // locked value = w11 = 1
+ 
+ 	// Try to grab the lock
++#if defined(MIDO)
++Lmido_enq_retry:						// ARMv8.0 casa w10, w11, [x3]
++	ldaxr	w12, [x3]
++	cbnz	w12, Lmido_enq_held
++	stxr	w13, w11, [x3]
++	cbnz	w13, Lmido_enq_retry
++	mov		w10, w12
++	b		Lmido_enq_done
++Lmido_enq_held:
++	clrex
++	mov		w10, w12
++Lmido_enq_done:
++#else
+ 	casa	w10, w11, [x3]	 // Atomic CAS with acquire barrier
++#endif
+ 	cbz		w10, Ltrylock_enqueue_success
+ 
+ 	mov		x0, #-1			// Failed
+@@ -323,7 +337,21 @@ _pfz_trylock_and_dequeue:
+ 	mov		w10, wzr		 // unlock value = w10 = 0
+ 	mov		w11, #1			 // locked value = w11 = 1
+ 
++#if defined(MIDO)
++Lmido_deq_retry:						// ARMv8.0 casa w10, w11, [x2]
++	ldaxr	w12, [x2]
++	cbnz	w12, Lmido_deq_held
++	stxr	w13, w11, [x2]
++	cbnz	w13, Lmido_deq_retry
++	mov		w10, w12
++	b		Lmido_deq_done
++Lmido_deq_held:
++	clrex
++	mov		w10, w12
++Lmido_deq_done:
++#else
+ 	casa	w10, w11, [x2]	 // Atomic CAS with acquire barrier
++#endif
+ 	cbz		w10, Ltrylock_dequeue_success
+ 
+ 	mov		x0, #-1			// Failed
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index 06bb568..00f2ed2 100644
 --- a/osfmk/arm64/arm_vm_init.c
@@ -476,7 +524,7 @@ index 9004f2b..a5aead4 100644
  
  #ifdef PRIVATE
 diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
-index b99c2f4..fa8381c 100644
+index b99c2f4..e3f67b1 100644
 --- a/pexpert/pexpert/arm64/SWEET.h
 +++ b/pexpert/pexpert/arm64/SWEET.h
 @@ -17,6 +17,13 @@
@@ -493,15 +541,20 @@ index b99c2f4..fa8381c 100644
  /*
   * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
   * cpus=N is clamped here. Same ISA level (ARMv8.2), 64-byte lines, PSCI
-@@ -34,9 +41,15 @@
+@@ -33,10 +40,18 @@
+ #define __ARM_DEBUG__             7
  #define __ARM_ENABLE_SWAP__       1
  #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
- #define __ARM_PAN_AVAILABLE__     1
+-#define __ARM_PAN_AVAILABLE__     1
 -#define __ARM_16K_PG__            1
+-
++#if !defined(MIDO)
++#define __ARM_PAN_AVAILABLE__     1   /* MIDO: A53 is ARMv8.0, no PAN */
++#endif
 +#if !defined(MIDO)
 +#define __ARM_16K_PG__            1   /* MIDO: A53 has no 16K granule -> 4K pages */
 +#endif
- 
++
 +#if defined(MIDO)
 +#define HAS_GIC_V2                1
 +#else
@@ -510,7 +563,7 @@ index b99c2f4..fa8381c 100644
  
  #ifndef ASSEMBLER
  #define PLATFORM_PANIC_LOG_DISABLED
-@@ -47,7 +60,11 @@
+@@ -47,7 +62,11 @@
   * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
   * (CNTV) is INTID 16 + 3 = 19.
   */
@@ -522,7 +575,7 @@ index b99c2f4..fa8381c 100644
  #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
  
  #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
-@@ -80,4 +97,22 @@
+@@ -80,4 +99,22 @@
  #define ICC_SRE_SRE                             0x1
  /* End of GICv3 register definitions */
  

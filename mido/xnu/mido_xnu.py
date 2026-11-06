@@ -49,6 +49,13 @@ edit('pexpert/pexpert/arm64/SWEET.h',
      '#if !defined(MIDO)\n'
      '#define __ARM_16K_PG__            1   /* MIDO: A53 has no 16K granule -> 4K pages */\n'
      '#endif\n')
+# Build #4: "Invalid register name pan" (copyio.c, pcb.c, platform_tests.c).
+# PAN is ARMv8.1; Cortex-A53 has none, so MIDO runs without it.
+edit('pexpert/pexpert/arm64/SWEET.h',
+     '#define __ARM_PAN_AVAILABLE__     1\n',
+     '#if !defined(MIDO)\n'
+     '#define __ARM_PAN_AVAILABLE__     1   /* MIDO: A53 is ARMv8.0, no PAN */\n'
+     '#endif\n')
 edit('pexpert/pexpert/arm64/SWEET.h',
      '#define HAS_GIC_V3                1\n',
      '#if defined(MIDO)\n'
@@ -402,6 +409,36 @@ edit('osfmk/arm64/start.s',
      '\t// Return to arm_init()\n\tret\n',
      '\tMIDO_MARK 6, 0xff0040ff\t\t\t\t\t// blue: returning to arm_init (C)\n'
      '\t// Return to arm_init()\n\tret\n')
+
+# ---------------------------------------------------------------- commpage_asm.s
+# Build #4: "instruction requires: lse" for the two PFZ trylock routines in the
+# commpage (mapped into every process). casa wN, wM, [xL] with expected 0 and
+# new 1 becomes an LDAXR/STXR loop; only caller-saved x9-x15 are used, w10
+# returns the old value, acquire pairs with the existing stlr release.
+def pfz_casa(lock, tag):
+    return ('#if defined(MIDO)\n'
+            f'Lmido_{tag}_retry:\t\t\t\t\t\t// ARMv8.0 casa w10, w11, [{lock}]\n'
+            f'\tldaxr\tw12, [{lock}]\n'
+            f'\tcbnz\tw12, Lmido_{tag}_held\n'
+            f'\tstxr\tw13, w11, [{lock}]\n'
+            f'\tcbnz\tw13, Lmido_{tag}_retry\n'
+            f'\tmov\t\tw10, w12\n'
+            f'\tb\t\tLmido_{tag}_done\n'
+            f'Lmido_{tag}_held:\n'
+            '\tclrex\n'
+            '\tmov\t\tw10, w12\n'
+            f'Lmido_{tag}_done:\n'
+            '#else\n'
+            f'\tcasa\tw10, w11, [{lock}]\t // Atomic CAS with acquire barrier\n'
+            '#endif\n')
+
+
+edit('osfmk/arm/commpage/commpage_asm.s',
+     '\t// Try to grab the lock\n\tcasa\tw10, w11, [x3]\t // Atomic CAS with acquire barrier\n',
+     '\t// Try to grab the lock\n' + pfz_casa('x3', 'enq'))
+edit('osfmk/arm/commpage/commpage_asm.s',
+     '\tcasa\tw10, w11, [x2]\t // Atomic CAS with acquire barrier\n',
+     pfz_casa('x2', 'deq'))
 
 # ---------------------------------------------------------------- sweet_early.c
 edit('osfmk/arm64/sweet_early.c',

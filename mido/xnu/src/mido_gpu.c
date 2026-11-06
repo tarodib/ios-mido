@@ -279,7 +279,8 @@ static int zap_load(void)
 	return (r || scm_r1) ? -7 : 0;
 }
 
-static uint32_t g_wptr;
+static uint32_t g_wptr;                 /* ring write index in dwords (ring is RING_DW long) */
+static int g_ready;                     /* bring-up passed: the user-client API is live */
 
 static int cp_start(void)
 {
@@ -430,6 +431,134 @@ static int blit_test(void)
 	return same == 65536 ? 0 : -1;
 }
 
+/*
+ * ---- API for the IOKit user client (iokit/Kernel/arm/MidoGPU.cpp) ----
+ * Buffer objects come from a fixed physical pool (0x99400000..0x9ff00000, below pstore)
+ * in 16 KB pages (the user page size); GPU address = physical address (the GPU SMMU
+ * context bank is left untranslated). Submission appends to the 16 KB ring, word by
+ * word with wrap-around (like Linux msm_ringbuffer): CP_INDIRECT_BUFFER, a CCU colour
+ * flush and a CACHE_FLUSH_TS that writes the fence sequence number when the work and
+ * its caches are done.
+ */
+#include <kern/locks.h>
+
+#define P_POOL       0x99400000UL
+#define POOL_END     0x9ff00000UL
+#define POOL_PAGE    0x4000UL
+#define POOL_PAGES   ((POOL_END - P_POOL) / POOL_PAGE)
+#define RING_DW      4096u
+#define O_FENCE      (O_SCRATCH + 0x400u)
+
+static LCK_GRP_DECLARE(mido_gpu_grp, "mido_gpu");
+static LCK_MTX_DECLARE(mido_gpu_mtx, &mido_gpu_grp);
+static uint8_t pool_used[POOL_PAGES];
+static uint32_t g_fence_seq;
+
+int mido_gpu_ready(void);
+int mido_gpu_ready(void)
+{
+	return g_ready;
+}
+
+uint64_t mido_gpu_bo_alloc(uint64_t size);
+uint64_t mido_gpu_bo_alloc(uint64_t size)
+{
+	uint64_t pages = (size + POOL_PAGE - 1) / POOL_PAGE, run = 0;
+	if (!g_ready || pages == 0 || pages > POOL_PAGES) {
+		return 0;
+	}
+	lck_mtx_lock(&mido_gpu_mtx);
+	for (uint64_t i = 0; i < POOL_PAGES; i++) {
+		run = pool_used[i] ? 0 : run + 1;
+		if (run == pages) {
+			uint64_t first = i + 1 - pages;
+			for (uint64_t j = first; j <= i; j++) {
+				pool_used[j] = 1;
+			}
+			lck_mtx_unlock(&mido_gpu_mtx);
+			return P_POOL + first * POOL_PAGE;
+		}
+	}
+	lck_mtx_unlock(&mido_gpu_mtx);
+	return 0;
+}
+
+void mido_gpu_bo_free(uint64_t pa, uint64_t size);
+void mido_gpu_bo_free(uint64_t pa, uint64_t size)
+{
+	if (pa < P_POOL || pa >= POOL_END) {
+		return;
+	}
+	uint64_t first = (pa - P_POOL) / POOL_PAGE, pages = (size + POOL_PAGE - 1) / POOL_PAGE;
+	lck_mtx_lock(&mido_gpu_mtx);
+	for (uint64_t j = first; j < first + pages && j < POOL_PAGES; j++) {
+		pool_used[j] = 0;
+	}
+	lck_mtx_unlock(&mido_gpu_mtx);
+}
+
+static void ring_put(uint32_t v)
+{
+	wr(W(O_RING) + 4u * (g_wptr % RING_DW), v);
+	g_wptr = (g_wptr + 1) % RING_DW;
+}
+
+/* Returns the fence sequence number, or 0 if the GPU is not ready / the ring is stuck. */
+uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
+uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords)
+{
+	if (!g_ready || dwords == 0 || dwords > 0xfffff) {
+		return 0;
+	}
+	lck_mtx_lock(&mido_gpu_mtx);
+	for (unsigned i = 0; i < 2000; i++) {               /* room for 20 dwords, up to 2 s */
+		uint32_t used = (g_wptr + RING_DW - gr(0x0806)) % RING_DW;
+		if (used + 20 < RING_DW) {
+			break;
+		}
+		delay(1000);
+	}
+	uint32_t seq = ++g_fence_seq;
+	ring_put(pkt7(0x3f, 3)); ring_put((uint32_t)ib); ring_put((uint32_t)(ib >> 32)); ring_put(dwords);
+	ring_put(pkt7(0x26, 0));                            /* CP_WAIT_FOR_IDLE */
+	ring_put(pkt7(0x46, 4)); ring_put(0x1d);            /* PC_CCU_FLUSH_COLOR_TS */
+	ring_put((uint32_t)(P_WORK + O_FENCE + 4)); ring_put(0); ring_put(seq);
+	ring_put(pkt7(0x46, 4)); ring_put(0x04);            /* CACHE_FLUSH_TS -> fence */
+	ring_put((uint32_t)(P_WORK + O_FENCE)); ring_put(0); ring_put(seq);
+	dsb();
+	gw(0x0807, g_wptr);                                 /* CP_RB_WPTR */
+	lck_mtx_unlock(&mido_gpu_mtx);
+	return seq;
+}
+
+/* 0 when fence seq has passed, -1 on timeout. */
+int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms);
+int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms)
+{
+	for (uint32_t t = 0; t <= timeout_ms * 10; t++) {
+		if ((int32_t)(rd(W(O_FENCE)) - seq) >= 0) {
+			return 0;
+		}
+		delay(100);
+	}
+	printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
+	    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
+	return -1;
+}
+
+uint32_t mido_gpu_param(uint32_t which);
+uint32_t mido_gpu_param(uint32_t which)
+{
+	switch (which) {
+	case 0: return 0x05000600;                          /* chip id */
+	case 1: return 506;                                 /* gpu id */
+	case 2: return 0x20000;                             /* GMEM size */
+	case 3: return g_ready;
+	case 4: return rd(W(O_FENCE));                      /* last completed fence */
+	default: return 0;
+	}
+}
+
 static void gpu_thread(void *arg, wait_result_t wr_)
 {
 	(void)arg;
@@ -448,6 +577,7 @@ static void gpu_thread(void *arg, wait_result_t wr_)
 	}
 	if (power_up() == 0 && cp_start() == 0 && blit_test() == 0) {
 		printf("MIDO GPU: READY (power, zap shader, CP, 2D blit all OK)\n");
+		g_ready = 1;
 	} else {
 		printf("MIDO GPU: bring-up stopped\n");
 	}

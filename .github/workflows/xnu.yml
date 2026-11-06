@@ -113,6 +113,17 @@ jobs:
           done
           ls -la out/kdk-libs
 
+      - name: mido iOS tools (midogpu-test, ad-hoc signed)
+        if: always()
+        run: |
+          mkdir -p out/ios-tools
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall \
+            -isysroot "$SDK" -F "$SDK/System/Library/Frameworks" -framework IOKit \
+            -o out/ios-tools/midogpu-test mido/tools/midogpu-test.c || true
+          [ -f out/ios-tools/midogpu-test ] && codesign -f -s - out/ios-tools/midogpu-test || true
+          ls -la out/ios-tools
+
       - name: Collect
         if: always()
         run: |

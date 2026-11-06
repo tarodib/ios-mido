@@ -13,10 +13,10 @@ index 6630131..5b98298 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_gpu.c b/bsd/dev/mido_gpu.c
 new file mode 100644
-index 0000000..10a28ce
+index 0000000..20d5721
 --- /dev/null
 +++ b/bsd/dev/mido_gpu.c
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,598 @@
 +/*
 + * mido (Redmi Note 4, MSM8953) Adreno 506 bring-up inside XNU, step 1 of GPU acceleration.
 + *
@@ -298,7 +298,8 @@ index 0000000..10a28ce
 +	return (r || scm_r1) ? -7 : 0;
 +}
 +
-+static uint32_t g_wptr;
++static uint32_t g_wptr;                 /* ring write index in dwords (ring is RING_DW long) */
++static int g_ready;                     /* bring-up passed: the user-client API is live */
 +
 +static int cp_start(void)
 +{
@@ -449,6 +450,134 @@ index 0000000..10a28ce
 +	return same == 65536 ? 0 : -1;
 +}
 +
++/*
++ * ---- API for the IOKit user client (iokit/Kernel/arm/MidoGPU.cpp) ----
++ * Buffer objects come from a fixed physical pool (0x99400000..0x9ff00000, below pstore)
++ * in 16 KB pages (the user page size); GPU address = physical address (the GPU SMMU
++ * context bank is left untranslated). Submission appends to the 16 KB ring, word by
++ * word with wrap-around (like Linux msm_ringbuffer): CP_INDIRECT_BUFFER, a CCU colour
++ * flush and a CACHE_FLUSH_TS that writes the fence sequence number when the work and
++ * its caches are done.
++ */
++#include <kern/locks.h>
++
++#define P_POOL       0x99400000UL
++#define POOL_END     0x9ff00000UL
++#define POOL_PAGE    0x4000UL
++#define POOL_PAGES   ((POOL_END - P_POOL) / POOL_PAGE)
++#define RING_DW      4096u
++#define O_FENCE      (O_SCRATCH + 0x400u)
++
++static LCK_GRP_DECLARE(mido_gpu_grp, "mido_gpu");
++static LCK_MTX_DECLARE(mido_gpu_mtx, &mido_gpu_grp);
++static uint8_t pool_used[POOL_PAGES];
++static uint32_t g_fence_seq;
++
++int mido_gpu_ready(void);
++int mido_gpu_ready(void)
++{
++	return g_ready;
++}
++
++uint64_t mido_gpu_bo_alloc(uint64_t size);
++uint64_t mido_gpu_bo_alloc(uint64_t size)
++{
++	uint64_t pages = (size + POOL_PAGE - 1) / POOL_PAGE, run = 0;
++	if (!g_ready || pages == 0 || pages > POOL_PAGES) {
++		return 0;
++	}
++	lck_mtx_lock(&mido_gpu_mtx);
++	for (uint64_t i = 0; i < POOL_PAGES; i++) {
++		run = pool_used[i] ? 0 : run + 1;
++		if (run == pages) {
++			uint64_t first = i + 1 - pages;
++			for (uint64_t j = first; j <= i; j++) {
++				pool_used[j] = 1;
++			}
++			lck_mtx_unlock(&mido_gpu_mtx);
++			return P_POOL + first * POOL_PAGE;
++		}
++	}
++	lck_mtx_unlock(&mido_gpu_mtx);
++	return 0;
++}
++
++void mido_gpu_bo_free(uint64_t pa, uint64_t size);
++void mido_gpu_bo_free(uint64_t pa, uint64_t size)
++{
++	if (pa < P_POOL || pa >= POOL_END) {
++		return;
++	}
++	uint64_t first = (pa - P_POOL) / POOL_PAGE, pages = (size + POOL_PAGE - 1) / POOL_PAGE;
++	lck_mtx_lock(&mido_gpu_mtx);
++	for (uint64_t j = first; j < first + pages && j < POOL_PAGES; j++) {
++		pool_used[j] = 0;
++	}
++	lck_mtx_unlock(&mido_gpu_mtx);
++}
++
++static void ring_put(uint32_t v)
++{
++	wr(W(O_RING) + 4u * (g_wptr % RING_DW), v);
++	g_wptr = (g_wptr + 1) % RING_DW;
++}
++
++/* Returns the fence sequence number, or 0 if the GPU is not ready / the ring is stuck. */
++uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
++uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords)
++{
++	if (!g_ready || dwords == 0 || dwords > 0xfffff) {
++		return 0;
++	}
++	lck_mtx_lock(&mido_gpu_mtx);
++	for (unsigned i = 0; i < 2000; i++) {               /* room for 20 dwords, up to 2 s */
++		uint32_t used = (g_wptr + RING_DW - gr(0x0806)) % RING_DW;
++		if (used + 20 < RING_DW) {
++			break;
++		}
++		delay(1000);
++	}
++	uint32_t seq = ++g_fence_seq;
++	ring_put(pkt7(0x3f, 3)); ring_put((uint32_t)ib); ring_put((uint32_t)(ib >> 32)); ring_put(dwords);
++	ring_put(pkt7(0x26, 0));                            /* CP_WAIT_FOR_IDLE */
++	ring_put(pkt7(0x46, 4)); ring_put(0x1d);            /* PC_CCU_FLUSH_COLOR_TS */
++	ring_put((uint32_t)(P_WORK + O_FENCE + 4)); ring_put(0); ring_put(seq);
++	ring_put(pkt7(0x46, 4)); ring_put(0x04);            /* CACHE_FLUSH_TS -> fence */
++	ring_put((uint32_t)(P_WORK + O_FENCE)); ring_put(0); ring_put(seq);
++	dsb();
++	gw(0x0807, g_wptr);                                 /* CP_RB_WPTR */
++	lck_mtx_unlock(&mido_gpu_mtx);
++	return seq;
++}
++
++/* 0 when fence seq has passed, -1 on timeout. */
++int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms);
++int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms)
++{
++	for (uint32_t t = 0; t <= timeout_ms * 10; t++) {
++		if ((int32_t)(rd(W(O_FENCE)) - seq) >= 0) {
++			return 0;
++		}
++		delay(100);
++	}
++	printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
++	    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
++	return -1;
++}
++
++uint32_t mido_gpu_param(uint32_t which);
++uint32_t mido_gpu_param(uint32_t which)
++{
++	switch (which) {
++	case 0: return 0x05000600;                          /* chip id */
++	case 1: return 506;                                 /* gpu id */
++	case 2: return 0x20000;                             /* GMEM size */
++	case 3: return g_ready;
++	case 4: return rd(W(O_FENCE));                      /* last completed fence */
++	default: return 0;
++	}
++}
++
 +static void gpu_thread(void *arg, wait_result_t wr_)
 +{
 +	(void)arg;
@@ -467,6 +596,7 @@ index 0000000..10a28ce
 +	}
 +	if (power_up() == 0 && cp_start() == 0 && blit_test() == 0) {
 +		printf("MIDO GPU: READY (power, zap shader, CP, 2D blit all OK)\n");
++		g_ready = 1;
 +	} else {
 +		printf("MIDO GPU: bring-up stopped\n");
 +	}
@@ -1342,6 +1472,229 @@ index bb2a2bf..3ce66f1 100644
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
  #else
  #define bsd_init_kprintf(x, ...)
+diff --git a/iokit/Kernel/arm/MidoGPU.cpp b/iokit/Kernel/arm/MidoGPU.cpp
+new file mode 100644
+index 0000000..8905165
+--- /dev/null
++++ b/iokit/Kernel/arm/MidoGPU.cpp
+@@ -0,0 +1,217 @@
++/*
++ * MidoGPU: user-space access to the Adreno 506 brought up by bsd/dev/mido_gpu.c.
++ *
++ * IOServiceMatching("MidoGPU") + IOServiceOpen(type 0). Buffer objects are physically
++ * contiguous pages of the GPU pool; their GPU address is their physical address.
++ * Map one with IOConnectMapMemory64(connect, handle, task, &addr, &size,
++ * kIOMapAnywhere | kIOMapWriteCombineCache): write-combined (normal non-cacheable),
++ * so the CPU and the non-coherent GPU agree without cache maintenance and unaligned
++ * CPU accesses still work. Selectors (scalars in / out):
++ *   0 GetParam    (which)                 -> (value)   0 chip id, 1 gpu id, 2 GMEM, 3 ready, 4 fence
++ *   1 BONew       (size)                  -> (handle, gpu address, size)
++ *   2 BOFree      (handle)
++ *   3 Submit      (ib gpu address, dwords) -> (fence)
++ *   4 Wait        (fence, timeout ms)      -> (0 done / 1 timed out)
++ *   5 Log         struct in: text -> kernel log ("MIDO GPU USER: ...")
++ * All buffers of a client are freed when it closes. Built in for mido (MIDO_BOARD).
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(MIDO_BOARD)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <sys/proc.h>
++
++extern "C" {
++int mido_gpu_ready(void);
++uint64_t mido_gpu_bo_alloc(uint64_t size);
++void mido_gpu_bo_free(uint64_t pa, uint64_t size);
++uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
++int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms);
++uint32_t mido_gpu_param(uint32_t which);
++}
++
++class MidoGPU : public IOService {
++	OSDeclareDefaultStructors(MidoGPU);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(MidoGPU, IOService);
++
++bool
++MidoGPU::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "MidoGPUUserClient");
++	registerService();
++	IOLog("MIDO GPU: MidoGPU service registered\n");
++	return true;
++}
++
++#define MIDO_GPU_MAX_BOS 4096
++
++class MidoGPUUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(MidoGPUUserClient);
++	struct bo { uint64_t pa, size; };
++	bo *fBOs;
++	IOLock *fLock;
++public:
++	bool initWithTask(task_t owningTask, void *securityToken, UInt32 type) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options,
++	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(MidoGPUUserClient, IOUserClient);
++
++bool
++MidoGPUUserClient::initWithTask(task_t owningTask, void *securityToken, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityToken, type)) {
++		return false;
++	}
++	fBOs = IONewZero(bo, MIDO_GPU_MAX_BOS);
++	fLock = IOLockAlloc();
++	return fBOs != NULL && fLock != NULL;
++}
++
++void
++MidoGPUUserClient::free(void)
++{
++	if (fBOs != NULL) {
++		for (unsigned i = 0; i < MIDO_GPU_MAX_BOS; i++) {
++			if (fBOs[i].size) {
++				mido_gpu_bo_free(fBOs[i].pa, fBOs[i].size);
++			}
++		}
++		IODelete(fBOs, bo, MIDO_GPU_MAX_BOS);
++	}
++	if (fLock != NULL) {
++		IOLockFree(fLock);
++	}
++	IOUserClient::free();
++}
++
++IOReturn
++MidoGPUUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++MidoGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
++{
++	if (type >= MIDO_GPU_MAX_BOS) {
++		return kIOReturnBadArgument;
++	}
++	IOLockLock(fLock);
++	bo b = fBOs[type];
++	IOLockUnlock(fLock);
++	if (!b.size) {
++		return kIOReturnBadArgument;
++	}
++	IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(b.pa, b.size, kIODirectionInOut);
++	if (md == NULL) {
++		return kIOReturnNoMemory;
++	}
++	*options = kIOMapWriteCombineCache;
++	*memory = md;                                       /* the caller consumes this reference */
++	return kIOReturnSuccess;
++}
++
++IOReturn
++MidoGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	if (!mido_gpu_ready()) {
++		return kIOReturnNotReady;
++	}
++	switch (selector) {
++	case 0:
++		if (a->scalarInputCount < 1 || a->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		a->scalarOutput[0] = mido_gpu_param((uint32_t)a->scalarInput[0]);
++		return kIOReturnSuccess;
++	case 1: {
++		if (a->scalarInputCount < 1 || a->scalarOutputCount < 3 || a->scalarInput[0] == 0 ||
++		    a->scalarInput[0] > 0x4000000) {
++			return kIOReturnBadArgument;
++		}
++		uint64_t size = (a->scalarInput[0] + 0x3fff) & ~0x3fffULL;
++		IOLockLock(fLock);
++		unsigned h;
++		for (h = 0; h < MIDO_GPU_MAX_BOS && fBOs[h].size; h++) {
++		}
++		if (h == MIDO_GPU_MAX_BOS) {
++			IOLockUnlock(fLock);
++			return kIOReturnNoResources;
++		}
++		uint64_t pa = mido_gpu_bo_alloc(size);
++		if (!pa) {
++			IOLockUnlock(fLock);
++			return kIOReturnNoMemory;
++		}
++		fBOs[h].pa = pa;
++		fBOs[h].size = size;
++		IOLockUnlock(fLock);
++		a->scalarOutput[0] = h;
++		a->scalarOutput[1] = pa;
++		a->scalarOutput[2] = size;
++		return kIOReturnSuccess;
++	}
++	case 2: {
++		if (a->scalarInputCount < 1 || a->scalarInput[0] >= MIDO_GPU_MAX_BOS) {
++			return kIOReturnBadArgument;
++		}
++		IOLockLock(fLock);
++		bo b = fBOs[a->scalarInput[0]];
++		fBOs[a->scalarInput[0]].size = 0;
++		IOLockUnlock(fLock);
++		if (b.size) {
++			mido_gpu_bo_free(b.pa, b.size);
++		}
++		return kIOReturnSuccess;
++	}
++	case 3: {
++		if (a->scalarInputCount < 2 || a->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		uint32_t seq = mido_gpu_submit(a->scalarInput[0], (uint32_t)a->scalarInput[1]);
++		a->scalarOutput[0] = seq;
++		return seq ? kIOReturnSuccess : kIOReturnError;
++	}
++	case 4:
++		if (a->scalarInputCount < 2 || a->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		a->scalarOutput[0] = mido_gpu_wait((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1]) ? 1 : 0;
++		return kIOReturnSuccess;
++	case 5: {
++		char text[256];
++		uint32_t n = a->structureInputSize < sizeof(text) - 1 ? a->structureInputSize : sizeof(text) - 1;
++		if (a->structureInput == NULL) {
++			return kIOReturnBadArgument;
++		}
++		memcpy(text, a->structureInput, n);
++		text[n] = 0;
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("MIDO GPU USER: %s: %s\n", name, text);
++		return kIOReturnSuccess;
++	}
++	default:
++		return kIOReturnUnsupported;
++	}
++}
++#endif /* MIDO_BOARD */
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index 2545cf9..9099496 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
@@ -1603,7 +1956,7 @@ index 27bc49d..f65cf5e 100644
  	IOLockLock(fLock);
  	bool was = fDown[finger];
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
-index 92f3e26..1c8b494 100644
+index 92f3e26..134cb86 100644
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
 @@ -44,7 +44,11 @@ const char * gIOKernelConfigTables =
@@ -1618,6 +1971,29 @@ index 92f3e26..1c8b494 100644
      "     'IOProbeScore'    = 10000:32;"
      "   },"
      "   {"
+@@ -57,6 +61,13 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+     "   },"
++#if defined(MIDO_BOARD)
++    "   {"
++    "     'IOClass'         = MidoGPU;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = MidoGPU;"
++    "   },"
++#endif
+     "   {"
+     "     'IOClass'         = IOCoreSurfaceRoot;"
+     "     'IOProviderClass' = IOResources;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index acc9ae0..1688ef9 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -20,3 +20,4 @@ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitc
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
++iokit/Kernel/arm/MidoGPU.cpp                                     optional iokitcpp
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
 index 69b13f9..6086ed9 100644
 --- a/makedefs/MakeInc.def

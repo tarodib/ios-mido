@@ -1704,9 +1704,33 @@ edit('osfmk/kern/startup.c',
      '\t\tmido_lse_report();\n'
      '\t}\n')
 
+# ---------------------------------------------------------------------------
+# GPU step 2: MidoGPU IOService + user client (buffer objects, submit, fences) on top
+# of bsd/dev/mido_gpu.c. Matches IOResources like the other built-in SWEET services.
+# ---------------------------------------------------------------------------
+create('iokit/Kernel/arm/MidoGPU.cpp',
+       (Path(__file__).resolve().parent / 'src' / 'MidoGPU.cpp').read_text())
+edit('iokit/conf/files.arm64',
+     'iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp\n',
+     'iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp\n'
+     'iokit/Kernel/arm/MidoGPU.cpp                                     optional iokitcpp\n')
+edit('iokit/KernelConfigTables.cpp',
+     "    \"     'IOMatchCategory' = IOWatchdog;\"\n"
+     "    \"   },\"\n",
+     "    \"     'IOMatchCategory' = IOWatchdog;\"\n"
+     "    \"   },\"\n"
+     '#if defined(MIDO_BOARD)\n'
+     "    \"   {\"\n"
+     "    \"     'IOClass'         = MidoGPU;\"\n"
+     "    \"     'IOProviderClass' = IOResources;\"\n"
+     "    \"     'IOMatchCategory' = MidoGPU;\"\n"
+     "    \"   },\"\n"
+     '#endif\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:
         print('  ' + f)
     sys.exit(1)
 print('mido_xnu.py: all edits applied')
+

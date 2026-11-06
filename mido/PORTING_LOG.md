@@ -246,9 +246,24 @@ NOT backed up: userdata (personal data — user to save it).
   16.2 MB, virt_base 0xfffffe0006000000 (→ PA 0xA0000000), entry 0xfffffe0007427488,
   kernel_end 0xfffffe0008464000 (→ PA 0xA2464000), 10 segments.
 - shim-boot.img 16.5 MB (fastboot max-download-size 0x20000000 = 512 MB).
-- `fastboot boot` → phone did **not** return to fastboot within 120 s → shim jumped to XNU
-  (the reset path only runs on refusal). Screen state = XNU's progress. Awaiting the user's photo,
-  then Power+Vol-Down to fastboot and pull the pre-jump log from `cache`.
+- `fastboot boot` → phone did **not** return to fastboot within 120 s → shim jumped to XNU.
+- **User photo:** shim output intact up to `BOOT ARGS PA=A2468000`, `TOP OF KERNEL=A246C000`,
+  `JUMP=A1427488`, `JUMPING TO XNU`, plus **XNU's stage-0 white band (64×32 px) at the bottom-left,
+  row 1888** = the MIDO start.s patch. → **XNU's first instructions run on the phone** (entry,
+  physical placement and fb address correct). No `SWEET EARLY` stage marks after it.
+- **Root cause:** with 4K pages `T1SZ_BOOT = 25` → TTBR1 covers only the top 512 GB
+  (0xffffff80_0000_0000+). MakeInc.def forces `ARM_LARGE_MEMORY` for every MacOSX-platform build
+  → kernel linked at 0xfffffe00_0700_4000 (−2 TB). MMU enable succeeds (executing V=P), the return
+  to `arm_init` at its KVA cannot translate, VBAR (also KVA) neither → silent hang.
+- **Fix (commit 7d3090e):** MakeInc.def keeps the iOS layout for MACHINE_CONFIG=SWEET (link
+  0xfffffff0_0700_4000, VM_MIN_KERNEL 0xffffffe0_0000_0000). Build #3: run 42152446197.
+- Prepared (uncommitted in repo/, push only if build #3 stops in start.s): `MIDO_MARK n, color`
+  in start.s — 48×32 squares right of the stage-0 band: 1 red (low vectors), 2 orange (bootstrap
+  tables built), 3 yellow (TCR/TTBR/MAIR), 4 green (about to enable MMU), 5 cyan (MMU on),
+  6 blue (ret to arm_init). x0–x3 parked in `mido_mark_save[4]` (sweet_early.c), x16/x17 scratch.
+  Anchors limited to start_first_cpu (start_cpu duplicates caught by the count check).
+  Patch with marks: +291/−7, `git apply --check` OK.
+- User forced the phone back to fastboot (Power + Vol-Down) after the first attempt.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

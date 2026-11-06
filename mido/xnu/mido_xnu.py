@@ -89,8 +89,11 @@ edit('pexpert/pexpert/arm64/SWEET.h',
 edit('makedefs/MakeInc.def',
      'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto\n',
      '# MIDO (Cortex-A53): ARMv8.0 only, so the kernel never emits LSE/RDM/FP16.\n'
+     '# -mcpu, not -march: `-arch arm64 -mmacosx-version-min` makes clang default to an\n'
+     '# Apple CPU whose features (LSE, RCpc, FP16, ...) -march does not remove. Build #3\n'
+     '# panicked on `ldadd` in lck_grp_reference (843 LSE sites in 517 functions).\n'
      '# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).\n'
-     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -march=armv8-a+crc+crypto\n')
+     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -mcpu=cortex-a53+crc+crypto\n')
 
 # First boot on the phone (build #2): XNU drew its stage-0 band, then hung
 # silently at the first kernel-VA access after the MMU came on. With 4K pages
@@ -330,11 +333,84 @@ edit('osfmk/arm64/start.s',
      '\tstr\t\tx11, [x13, x12, lsl #TTE_SHIFT]\n'
      '#endif\n')
 
+# ---------------------------------------------------------------- start.s progress marks
+# MIDO_MARK n, color: a 48x32 square right of the stage-0 band (row 1888),
+# square n at x = 64 + 56*(n-1). No stack yet, so x0-x3 are parked in a C
+# global (sweet_early.c); x16/x17 are clobbered (IP0/IP1 scratch). Works MMU
+# off (PA) and MMU on (V=P map, fb blocks mapped above). Last square = last
+# step reached.
+edit('osfmk/arm64/start.s',
+     '.macro MSR_TCR_EL1_X1\n',
+     '#if defined(MIDO)\n'
+     '.macro MIDO_MARK n, color\n'
+     '\tadrp\tx16, EXT(mido_mark_save)@page\n'
+     '\tadd\t\tx16, x16, EXT(mido_mark_save)@pageoff\n'
+     '\tstp\t\tx0, x1, [x16]\n'
+     '\tstp\t\tx2, x3, [x16, #16]\n'
+     '\tMOV64\tx0, (0x90001000 + 1888 * 4320 + (64 + 56 * (\\n - 1)) * 4)\n'
+     '\tMOV64\tx1, \\color\n'
+     '\tmov\t\tx2, #32\n'
+     'Lmido_mark_row\\@:\n'
+     '\tmov\t\tx3, #48\n'
+     '\tmov\t\tx17, x0\n'
+     'Lmido_mark_px\\@:\n'
+     '\tstr\t\tw1, [x17], #4\n'
+     '\tsubs\tx3, x3, #1\n'
+     '\tb.ne\tLmido_mark_px\\@\n'
+     '\tadd\t\tx0, x0, #4096\n'
+     '\tadd\t\tx0, x0, #224\t\t\t\t\t\t// stride 4320 (not an add immediate)\n'
+     '\tsubs\tx2, x2, #1\n'
+     '\tb.ne\tLmido_mark_row\\@\n'
+     '\tdsb\t\tsy\n'
+     '\tldp\t\tx0, x1, [x16]\n'
+     '\tldp\t\tx2, x3, [x16, #16]\n'
+     '.endmacro\n'
+     '#else\n'
+     '.macro MIDO_MARK n, color\n'
+     '.endmacro\n'
+     '#endif\n'
+     '\n'
+     '.macro MSR_TCR_EL1_X1\n')
+# Anchors are specific to start_first_cpu: start_cpu (secondary CPUs) has its
+# own LowExceptionVectorBase load and `b common_start` (found by the count check).
+edit('osfmk/arm64/start.s',
+     '\t// Set low reset vector before attempting any loads\n'
+     '\tadrp\tx0, EXT(LowExceptionVectorBase)@page\n'
+     '\tadd\t\tx0, x0, EXT(LowExceptionVectorBase)@pageoff\n\tMSR_VBAR_EL1_X0\n',
+     '\t// Set low reset vector before attempting any loads\n'
+     '\tadrp\tx0, EXT(LowExceptionVectorBase)@page\n'
+     '\tadd\t\tx0, x0, EXT(LowExceptionVectorBase)@pageoff\n\tMSR_VBAR_EL1_X0\n'
+     '\tMIDO_MARK 1, 0xffff0000\t\t\t\t\t// red: low vectors set\n')
+edit('osfmk/arm64/start.s',
+     '\t/* Ensure TTEs are visible */\n\tdsb\t\tish\n\n\n\tb\t\tcommon_start\n',
+     '\t/* Ensure TTEs are visible */\n\tdsb\t\tish\n\n\n'
+     '\tMIDO_MARK 2, 0xffff8000\t\t\t\t\t// orange: bootstrap page tables built\n'
+     '\tb\t\tcommon_start\n')
+edit('osfmk/arm64/start.s',
+     '\tmsr\t\tMAIR_EL1, x0\n\tisb\n\ttlbi\tvmalle1\n\tdsb\t\tish\n',
+     '\tmsr\t\tMAIR_EL1, x0\n\tisb\n\ttlbi\tvmalle1\n\tdsb\t\tish\n'
+     '\tMIDO_MARK 3, 0xffffff00\t\t\t\t\t// yellow: TCR/TTBR/MAIR set\n')
+edit('osfmk/arm64/start.s',
+     '\t// Enable caches, MMU, ROP and JOP\n',
+     '\tMIDO_MARK 4, 0xff00ff00\t\t\t\t\t// green: about to enable the MMU\n'
+     '\t// Enable caches, MMU, ROP and JOP\n')
+edit('osfmk/arm64/start.s',
+     '\tMOV64   x0, SCTLR_EL1_DEFAULT\n\tMSR_SCTLR_EL1_X0\n\tisb\t\tsy\n',
+     '\tMOV64   x0, SCTLR_EL1_DEFAULT\n\tMSR_SCTLR_EL1_X0\n\tisb\t\tsy\n'
+     '\tMIDO_MARK 5, 0xff00ffff\t\t\t\t\t// cyan: running with the MMU on\n')
+edit('osfmk/arm64/start.s',
+     '\t// Return to arm_init()\n\tret\n',
+     '\tMIDO_MARK 6, 0xff0040ff\t\t\t\t\t// blue: returning to arm_init (C)\n'
+     '\t// Return to arm_init()\n\tret\n')
+
 # ---------------------------------------------------------------- sweet_early.c
 edit('osfmk/arm64/sweet_early.c',
      'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;\n',
      '#if defined(MIDO)\n'
      'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)MIDO_FB_PHYS;\n'
+     '/* start.s MIDO_MARK parks x0-x3 here (no stack that early). */\n'
+     'extern uint64_t mido_mark_save[4];\n'
+     'uint64_t mido_mark_save[4];\n'
      '#else\n'
      'static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;\n'
      '#endif\n')

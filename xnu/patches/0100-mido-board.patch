@@ -22,21 +22,24 @@ index 2545cf9..e00e1b6 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
-index 69b13f9..4ac9b2e 100644
+index 69b13f9..2ac4739 100644
 --- a/makedefs/MakeInc.def
 +++ b/makedefs/MakeInc.def
-@@ -61,7 +61,9 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
+@@ -61,7 +61,12 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
  MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
  MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
  MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
 -MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
 +# MIDO (Cortex-A53): ARMv8.0 only, so the kernel never emits LSE/RDM/FP16.
++# -mcpu, not -march: `-arch arm64 -mmacosx-version-min` makes clang default to an
++# Apple CPU whose features (LSE, RCpc, FP16, ...) -march does not remove. Build #3
++# panicked on `ldadd` in lck_grp_reference (843 LSE sites in 517 functions).
 +# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).
-+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -march=armv8-a+crc+crypto
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -mcpu=cortex-a53+crc+crypto
  
  
  #
-@@ -331,11 +333,14 @@ ARM64_PLKSEG_ADDR  =0xfffffff004004000
+@@ -331,11 +336,14 @@ ARM64_PLKSEG_ADDR  =0xfffffff004004000
  ARM64_LINK_ADDR    =0xfffffff007004000
  
  # Use ARM_LARGE_MEMORY config for all MacOSX targets.
@@ -172,10 +175,46 @@ index 24f1abc..4f30567 100644
  	__builtin_arm_isb(ISB_SY);
  #else
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 023086f..eae6d4a 100644
+index 023086f..f84d930 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -515,7 +515,11 @@ LEXT(start_first_cpu)
+@@ -52,6 +52,35 @@
+ #endif
+ .endmacro
+ 
++#if defined(MIDO)
++.macro MIDO_MARK n, color
++	adrp	x16, EXT(mido_mark_save)@page
++	add		x16, x16, EXT(mido_mark_save)@pageoff
++	stp		x0, x1, [x16]
++	stp		x2, x3, [x16, #16]
++	MOV64	x0, (0x90001000 + 1888 * 4320 + (64 + 56 * (\n - 1)) * 4)
++	MOV64	x1, \color
++	mov		x2, #32
++Lmido_mark_row\@:
++	mov		x3, #48
++	mov		x17, x0
++Lmido_mark_px\@:
++	str		w1, [x17], #4
++	subs	x3, x3, #1
++	b.ne	Lmido_mark_px\@
++	add		x0, x0, #4096
++	add		x0, x0, #224						// stride 4320 (not an add immediate)
++	subs	x2, x2, #1
++	b.ne	Lmido_mark_row\@
++	dsb		sy
++	ldp		x0, x1, [x16]
++	ldp		x2, x3, [x16, #16]
++.endmacro
++#else
++.macro MIDO_MARK n, color
++.endmacro
++#endif
++
+ .macro MSR_TCR_EL1_X1
+ #if defined(KERNEL_INTEGRITY_KTRR)
+ 	mov		x0, x1
+@@ -515,7 +544,11 @@ LEXT(start_first_cpu)
  
  #if defined(SWEET)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -187,7 +226,15 @@ index 023086f..eae6d4a 100644
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -686,6 +690,26 @@ Lkernelcache_base_found:
+@@ -536,6 +569,7 @@ Lsweet_mark_pixel:
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+ 	MSR_VBAR_EL1_X0
++	MIDO_MARK 1, 0xffff0000					// red: low vectors set
+ 
+ 
+ 	// Get the kernel memory parameters from the boot args
+@@ -686,6 +720,26 @@ Lkernelcache_base_found:
  	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
  	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
  	 */
@@ -214,7 +261,7 @@ index 023086f..eae6d4a 100644
  	MOV64	x10, 0x9c000000
  	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
  	orr		x11, x11, x10
-@@ -693,6 +717,7 @@ Lkernelcache_base_found:
+@@ -693,12 +747,14 @@ Lkernelcache_base_found:
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
  	add		x13, x25, #(2 * PGBYTES)
  	str		x11, [x13, x12, lsl #TTE_SHIFT]
@@ -222,16 +269,55 @@ index 023086f..eae6d4a 100644
  #endif
  
  	/* Ensure TTEs are visible */
+ 	dsb		ish
+ 
+ 
++	MIDO_MARK 2, 0xffff8000					// orange: bootstrap page tables built
+ 	b		common_start
+ 
+ /*
+@@ -770,6 +826,7 @@ common_start:
+ 	isb
+ 	tlbi	vmalle1
+ 	dsb		ish
++	MIDO_MARK 3, 0xffffff00					// yellow: TCR/TTBR/MAIR set
+ 
+ 
+ #if defined(BCM2837)
+@@ -832,10 +889,12 @@ common_start:
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+ 
++	MIDO_MARK 4, 0xff00ff00					// green: about to enable the MMU
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
++	MIDO_MARK 5, 0xff00ffff					// cyan: running with the MMU on
+ 
+ #if !VMAPPLE && !defined(SWEET)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+@@ -899,6 +958,7 @@ common_start:
+ 	mov	lr, x21
+ #endif
+ 
++	MIDO_MARK 6, 0xff0040ff					// blue: returning to arm_init (C)
+ 	// Return to arm_init()
+ 	ret
+ 
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..d289bd5 100644
+index 6928957..53b7988 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -11,10 +11,18 @@
+@@ -11,10 +11,21 @@
  #include <stdint.h>
  #include <kern/misc_protos.h>
  
 +#if defined(MIDO)
 +static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)MIDO_FB_PHYS;
++/* start.s MIDO_MARK parks x0-x3 here (no stack that early). */
++extern uint64_t mido_mark_save[4];
++uint64_t mido_mark_save[4];
 +#else
  static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
 +#endif

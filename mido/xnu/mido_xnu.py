@@ -1204,7 +1204,7 @@ edit('osfmk/kern/startup.c',
      'static inline void\nkernel_bootstrap_log(const char *message)\n{\n',
      '#if defined(MIDO_BOARD)\n'
      '#include <kern/thread_call.h>\n'
-     '#include <kern/thread_kernel_state.h>\n'
+     '/* thread_kernel_state_t: kern/thread_kernel_state.h is already included (and has no #define guard) */\n'
      'static const char *volatile mido_boot_stage = "start";\n'
      'static thread_call_t mido_tick_call;\n'
      'static uint32_t mido_ticks;\n'

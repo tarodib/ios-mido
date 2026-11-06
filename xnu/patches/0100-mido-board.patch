@@ -1053,7 +1053,7 @@ index 6928957..53b7988 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
-index bec97fb..8306423 100644
+index bec97fb..e781820 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
 @@ -218,9 +218,59 @@ extern int serverperfmode;
@@ -1062,7 +1062,7 @@ index bec97fb..8306423 100644
  
 +#if defined(MIDO_BOARD)
 +#include <kern/thread_call.h>
-+#include <kern/thread_kernel_state.h>
++/* thread_kernel_state_t: kern/thread_kernel_state.h is already included (and has no #define guard) */
 +static const char *volatile mido_boot_stage = "start";
 +static thread_call_t mido_tick_call;
 +static uint32_t mido_ticks;

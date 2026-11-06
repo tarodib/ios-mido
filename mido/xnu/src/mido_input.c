@@ -25,6 +25,8 @@
 #include <pexpert/pexpert.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+/* osfmk/kern/thread.h, not exported to the BSD layer */
+extern kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);
 extern void sweet_hid_key(int key, int down);
 extern void sweet_hid_touch(int finger, int down, int x, int y);
 void mido_input_init(void);

@@ -12,10 +12,10 @@ index 6630131..d4baef2 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_input.c b/bsd/dev/mido_input.c
 new file mode 100644
-index 0000000..1f73714
+index 0000000..38959d4
 --- /dev/null
 +++ b/bsd/dev/mido_input.c
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,315 @@
 +/*
 + * MIDO (Redmi Note 4, MSM8953) input: FT5435 touch, power / volume keys.
 + *
@@ -43,6 +43,8 @@ index 0000000..1f73714
 +#include <pexpert/pexpert.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++/* osfmk/kern/thread.h, not exported to the BSD layer */
++extern kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);
 +extern void sweet_hid_key(int key, int down);
 +extern void sweet_hid_touch(int finger, int down, int x, int y);
 +void mido_input_init(void);

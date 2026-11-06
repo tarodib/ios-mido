@@ -851,3 +851,18 @@ on the phone. What it took after stage 2 (in order of discovery):
   GPU ring/scratch/fw/IB/surfaces at 0xa0000000+.
 - Next: move power-up + zap + CP init into an XNU GPU driver, then an msm-style
   BO/submit interface for Mesa freedreno in backboardd.
+
+### GPU in XNU: bring-up driver works on the first boot (2026-11-06, night)
+- `bsd/dev/mido_gpu.c` (repo mido/xnu/src, commit b96bfeb, CI run 42296201174), boot-arg
+  `midogpu=1`; firmware via `mkpayload.py --blob GPU-PM4/GPU-PFP/GPU-ZAP-MDT/GPU-ZAP-SEG`
+  (files from fw/gpu, never committed). Image: shim/out/shim-boot-gpu1.img (image B
+  command line + midogpu=1, shim with eMMC HS50).
+- Fixed physical windows outside XNU RAM, mapped uncached with ml_io_map: secure PTBL
+  0x98000000, zap 0x98800000, ring/fw/test buffers 0x99000000.
+- Persistent log (tools/sweetlog.ps1): CX on, TZ restore 0, GX on, secure PTBL 0x21000 ok,
+  zap AUTH_AND_RESET 0, "CP runs in 1 ms", "2D blit done in 1 ms: 65536 of 65536 pixels
+  match", "MIDO GPU: READY". iOS reached the lock screen as before (rendering is still CPU).
+- eMMC HS50 boot (shim-boot-run27-B60smp4-emmc50.img): user: "approximately the same time,
+  maybe a bit faster". Boot is bound by the CPU and the PIO transport, not the bus clock.
+- Next: a user-space submit interface (msm-style BO + submit + fence) for Mesa freedreno,
+  then Mesa in backboardd behind an EAGL shim, then a GPU present path for the display.

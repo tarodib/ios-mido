@@ -811,3 +811,18 @@ Next, in order:
   `adb exec-out dd if=/dev/block/bootdevice/by-name/cache bs=512 count=128`.
 - Next: GPU stage 2, CP microcode (a530_pm4/pfp) + ring buffer NOP/scratch test, then
   the zap shader (PAS via TZ) and an XNU GPU driver.
+
+### GPU stage 2: the command processor runs (2026-11-06)
+- Shim test image `shim-gpustage2.img` (`build.py gpufw`: the ramdisk is a "MIDOGPU1" blob
+  of a530_pm4.fw + a530_pfp.fw from fw/gpu, never committed).
+- Firmware copied without its 4-byte header to 0xa0008000 / 0xa0010000, ring at 0xa0000000,
+  scratch at 0xa0004000 (the shim runs with the MMU and caches off, so no cache maintenance).
+- GPU SMMU: IDR1 0x20008004 -> context banks at +0x8000. CB0 (gfx3d_user, non-secure) SCTLR=0
+  after the TZ restore, so the GPU's addresses pass untranslated. TRUST_CNTL already 0.
+- a5xx_hw_init subset (A510-size CP thresholds), CP_ME_INIT (8 dwords, no microcode
+  workarounds), CP_MEM_WRITE 0xc0ffee01, NOP. Result: RPTR=WPTR=14, HW_FAULT=0,
+  **SCRATCH=0xC0FFEE01: the command processor works.** No zap shader was needed for this.
+- The first attempt reset the SoC after the CP start. The second, with 5 ms after the halt
+  release and 2 ms after WPTR (and a log flush in between), passed.
+- Next: make the GPU draw something visible (2D blit/fill into the framebuffer at
+  0x90001000), then move the bring-up into an XNU driver.

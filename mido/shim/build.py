@@ -52,6 +52,14 @@ def main():
     kpath = os.path.join(OUT, 'Image.gz-dtb')
     open(kpath, 'wb').write(kernel)
     rd = sys.argv[1] if len(sys.argv) > 1 else None
+    if rd == 'gpufw':
+        # GPU test ramdisk: "MIDOGPU1", pm4 length, pfp length, then both files as pulled
+        # from the phone (fw/gpu, outside git; Qualcomm firmware is never committed).
+        fw = os.path.join(ROOT, 'fw', 'gpu')
+        pm4 = open(os.path.join(fw, 'a530_pm4.fw'), 'rb').read()
+        pfp = open(os.path.join(fw, 'a530_pfp.fw'), 'rb').read()
+        rd = os.path.join(OUT, 'gpufw.bin')
+        open(rd, 'wb').write(b'MIDOGPU1' + struct.pack('<II', len(pm4), len(pfp)) + pm4 + pfp)
     if not rd:
         rd = os.path.join(OUT, 'empty.cpio.gz')   # LK dislikes a zero-size ramdisk
         trailer = b'070701' + b'0' * 8 * 11 + b'0000000B' + b'0' * 8 + b'TRAILER!!!\0'

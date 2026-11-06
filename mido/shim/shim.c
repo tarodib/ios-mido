@@ -463,7 +463,14 @@ void shim_main(uint64_t dtb)
 		/* CPU sweep, eMMC fast and the DDR probe passed 2026-11-06: GPU only now */
 		con_puts("EMMC FAST MODE="); con_dec((uint64_t)(int64_t)emmc_mode);
 		con_puts(" (0 SLOW, 1 8BIT 25MHZ, 2 8BIT HS 50MHZ)\n");
-		gpu_probe();           /* GPU stage 1; a wrong power sequence hangs here */
+		/* Each GPU stage gets its own screen: 8 s to photograph, then a clear. */
+		if (gpu_probe() == 0) {  /* GPU stage 1: power, clocks, TZ restore, register read */
+			con_puts("\n(STAGE 2 ON A CLEAN SCREEN IN 8 S)\n");
+			flush_log();
+			delay_ms(8000);
+			con_clear(C_NAVY);
+			gpu_stage2(dtb);     /* stage 2: CP microcode + ring (needs the MIDOGPU1 ramdisk) */
+		}
 		flush_log();
 	}
 	con_puts("EMMC CODE "); con_dec(emmc_code);

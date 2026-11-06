@@ -265,3 +265,188 @@ int gpu_probe(void)
 	con_puts("\n GPU STAGE 1 DONE\n");
 	return 0;
 }
+
+/*
+ * GPU stage 2: command processor test (shim only, after gpu_probe() succeeded).
+ * Sequence after Linux a5xx_hw_init / a5xx_me_init (register offsets: Mesa
+ * a5xx.xml dword offsets; opcodes: adreno_pm4.xml):
+ *   - firmware from the test image's ramdisk ("MIDOGPU1" blob made by build.py
+ *     from fw/gpu, not in git), copied without its 4-byte header to 0xa0008000 /
+ *     0xa0010000; ring at 0xa0000000, scratch at 0xa0004000. The MMU and caches
+ *     are off in the shim, so the GPU and the CPU see the same bytes.
+ *   - GPU SMMU: TZ owns the global registers (static context banks; reading
+ *     +0x400 resets the SoC). Only the non-secure context bank 0 (gfx3d_user)
+ *     is read here; with its SCTLR.M = 0 the GPU's addresses pass untranslated.
+ *   - CP_ME_INIT, then CP_MEM_WRITE 0xc0ffee01 to scratch, then a NOP.
+ */
+#include "fdt.h"
+
+#define R_CP_RB_BASE            0x0800
+#define R_CP_RB_CNTL            0x0802
+#define R_CP_RB_RPTR            0x0806
+#define R_CP_RB_WPTR            0x0807
+#define R_CP_ROQ_THRESHOLDS_1   0x081f
+#define R_CP_ROQ_THRESHOLDS_2   0x0820
+#define R_CP_MEQ_THRESHOLDS     0x0825
+#define R_CP_MERCIU_SIZE        0x0826
+#define R_CP_PFP_ME_CNTL        0x0832
+#define R_CP_CHICKEN_DBG        0x0833
+#define R_CP_PFP_INSTR_BASE     0x0835
+#define R_CP_ME_INSTR_BASE      0x0838
+#define R_CP_ADDR_MODE_CNTL     0x0860
+#define R_CP_INTERRUPT_STATUS   0x0b18
+#define R_CP_HW_FAULT           0x0b1a
+#define R_RBBM_AHB_CNTL0        0x0093
+#define R_RBBM_AHB_CNTL1        0x0094
+#define R_RBBM_AHB_CNTL2        0x0095
+#define R_RBBM_INT_0_STATUS     0x04e1
+#define R_RBBM_STATUS           0x04f5
+#define R_VBIF_RR_QOS_ARB       0x3049
+#define R_SECVID_TRUST_CNTL     0xf400
+#define R_SECVID_TSB_BASE       0xf800
+#define R_SECVID_TSB_SIZE       0xf802
+#define R_SECVID_TSB_CNTL       0xf803
+#define R_SECVID_TSB_ADDR_MODE  0xf810
+#define CP_NOP                  0x10
+#define CP_MEM_WRITE            0x3d
+#define CP_ME_INIT              0x48
+
+#define G_RING     0xa0000000UL
+#define G_SCRATCH  0xa0004000UL
+#define G_PM4      0xa0008000UL
+#define G_PFP      0xa0010000UL
+#define SMMU_BASE  0x01c40000UL
+
+static void gw(uint32_t reg, uint32_t v) { wr(GPU_REG(reg), v); }
+static uint32_t gr(uint32_t reg) { return rd(GPU_REG(reg)); }
+static void gw64(uint32_t reg, uint64_t v) { gw(reg, (uint32_t)v); gw(reg + 1, (uint32_t)(v >> 32)); }
+
+static uint32_t par(uint32_t v)
+{
+	v ^= v >> 16; v ^= v >> 8; v ^= v >> 4;
+	return (0x9669u >> (v & 0xf)) & 1u;
+}
+
+/* type-7 packet header (Linux msm_ringbuffer OUT_PKT7) */
+static uint32_t pkt7(uint32_t op, uint32_t cnt)
+{
+	return (7u << 28) | cnt | (par(cnt) << 15) | ((op & 0x7fu) << 16) | (par(op) << 23);
+}
+
+static void cp_state(const char *when)
+{
+	con_puts(when);
+	con_puts(" RBBM_ST="); con_hex(gr(R_RBBM_STATUS), 8);
+	con_puts(" RPTR="); con_dec(gr(R_CP_RB_RPTR));
+	con_puts(" WPTR="); con_dec(gr(R_CP_RB_WPTR));
+	con_puts(" HWF="); con_hex(gr(R_CP_HW_FAULT), 8);
+	con_puts(" CPINT="); con_hex(gr(R_CP_INTERRUPT_STATUS), 8);
+	con_puts(" RBBMINT="); con_hex(gr(R_RBBM_INT_0_STATUS), 8);
+	con_puts(" TRUST="); con_hex(gr(R_SECVID_TRUST_CNTL), 8); con_putc('\n');
+}
+
+static void copy_fw(uintptr_t dst, uintptr_t src, uint32_t len)
+{
+	for (uint32_t i = 4; i + 3 < len; i += 4)                 /* skip the version dword */
+		wr(dst + i - 4, rd(src + i));
+}
+
+int gpu_stage2(uint64_t dtb)
+{
+	con_puts("\nGPU STAGE 2 (CP)\n");
+	uint64_t lo = 0, hi = 0;
+	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &lo) || !fdt_chosen_u64(dtb, "linux,initrd-end", &hi) ||
+	    hi - lo < 16 || rd(lo) != 0x4f44494du || rd(lo + 4) != 0x31555047u) {   /* "MIDOGPU1" */
+		con_puts(" NO MIDOGPU1 BLOB IN THE RAMDISK - NO CP TEST\n");
+		return -1;
+	}
+	uint32_t pm4_len = rd(lo + 8), pfp_len = rd(lo + 12);
+	if (16 + (uint64_t)pm4_len + pfp_len > hi - lo || pm4_len > 0x8000 || pfp_len > 0x8000) {
+		con_puts(" BAD BLOB SIZES\n");
+		return -1;
+	}
+	copy_fw(G_PM4, lo + 16, pm4_len);
+	copy_fw(G_PFP, lo + 16 + pm4_len, pfp_len);
+	for (uintptr_t a = G_RING; a < G_PM4; a += 4)
+		wr(a, 0);
+	con_puts(" PM4 "); con_dec(pm4_len); con_puts(" B VER="); con_hex(rd(G_PM4), 8);
+	con_puts(" PFP "); con_dec(pfp_len); con_puts(" B VER="); con_hex(rd(G_PFP), 8); con_putc('\n');
+
+	/* SMMU: global ID registers (non-secure view) and context bank 0 only */
+	uint32_t idr1 = rd(SMMU_BASE + 0x24);
+	uint32_t pgsz = (idr1 & (1u << 31)) ? 0x10000u : 0x1000u;
+	uint32_t npages = 1u << (((idr1 >> 28) & 7u) + 1);
+	uintptr_t cb0 = SMMU_BASE + (uintptr_t)npages * pgsz;
+	con_puts(" SMMU CR0="); con_hex(rd(SMMU_BASE), 8);
+	con_puts(" IDR1="); con_hex(idr1, 8);
+	con_puts(" CB0@"); con_hex(cb0, 8);
+	if (cb0 + 0x1000 > SMMU_BASE + 0x10000) {
+		con_puts(" OUTSIDE THE SMMU WINDOW - STOP\n");
+		return -1;
+	}
+	con_puts("\n CB0 SCTLR="); con_hex(rd(cb0 + 0x0), 8);
+	con_puts(" TCR="); con_hex(rd(cb0 + 0x30), 8);
+	con_puts(" TTBR0="); con_hex(rd(cb0 + 0x24), 8); con_hex(rd(cb0 + 0x20), 8);
+	con_puts(" FSR="); con_hex(rd(cb0 + 0x58), 8); con_putc('\n');
+	if (rd(cb0) & 1u) {
+		/* translation on: turn this context bank's stage 1 off so PA = VA */
+		wr(cb0, rd(cb0) & ~1u);
+		con_puts(" CB0 SCTLR.M CLEARED -> "); con_hex(rd(cb0), 8); con_putc('\n');
+	}
+
+	/* subset of a5xx_hw_init */
+	gw(R_VBIF_RR_QOS_ARB, 3);
+	gw(R_RBBM_AHB_CNTL0, 1);
+	gw(R_CP_MEQ_THRESHOLDS, 0x20);
+	gw(R_CP_MERCIU_SIZE, 0x20);
+	gw(R_CP_ROQ_THRESHOLDS_2, 0x40000030);
+	gw(R_CP_ROQ_THRESHOLDS_1, 0x20100d0a);
+	gw(R_CP_CHICKEN_DBG, 0x02000000);
+	gw(R_RBBM_AHB_CNTL1, 0xa6ffffff);
+	gw(R_RBBM_AHB_CNTL2, 0x3f);
+	gw(R_SECVID_TSB_CNTL, 0);
+	gw64(R_SECVID_TSB_BASE, 0);
+	gw(R_SECVID_TSB_SIZE, 0);
+	gw(R_CP_ADDR_MODE_CNTL, 1);
+	gw(R_SECVID_TSB_ADDR_MODE, 1);
+	gw64(R_CP_ME_INSTR_BASE, G_PM4);
+	gw64(R_CP_PFP_INSTR_BASE, G_PFP);
+	gw64(R_CP_RB_BASE, G_RING);
+	gw(R_CP_RB_CNTL, 11u | (2u << 8) | (1u << 27));   /* 16 KB ring, 32 B blocks, no rptr writeback */
+	cp_state(" BEFORE ME START:");
+
+	uint32_t n = 0;
+	uintptr_t rb = G_RING;
+#define RB(v) do { wr(rb + 4u * n, (v)); n++; } while (0)
+	RB(pkt7(CP_ME_INIT, 8));
+	RB(0x2f); RB(0x3); RB(0x20000000); RB(0); RB(0); RB(0); RB(0); RB(0);
+	RB(pkt7(CP_MEM_WRITE, 3));
+	RB((uint32_t)G_SCRATCH); RB((uint32_t)(G_SCRATCH >> 32)); RB(0xc0ffee01u);
+	RB(pkt7(CP_NOP, 0));
+#undef RB
+	__asm__ volatile("dsb sy" ::: "memory");
+	con_puts(" STARTING THE CP\n");
+	shim_flush_log();
+
+	/* Run 1 reset the SoC somewhere after this point: split into steps, log each. */
+	gw(R_CP_PFP_ME_CNTL, 0);                       /* clear the ME/PFP halt: microcode fetch */
+	delay_us(5000);
+	cp_state(" A HALT CLEARED:");
+	con_puts(" A CB0 FSR="); con_hex(rd(cb0 + 0x58), 8); con_putc('\n');
+	shim_flush_log();
+	gw(R_CP_RB_WPTR, n);                           /* ring fetch */
+	delay_us(2000);
+	cp_state(" B WPTR WRITTEN:");
+	shim_flush_log();
+	unsigned ms;
+	for (ms = 0; ms < 500 && gr(R_CP_RB_RPTR) != n; ms++)
+		delay_us(1000);
+	delay_us(2000);
+	uint32_t got = rd(G_SCRATCH);
+	cp_state(ms < 500 ? " RING CONSUMED:" : " RING NOT CONSUMED (500 MS):");
+	con_puts(" CB0 FSR="); con_hex(rd(cb0 + 0x58), 8);
+	con_puts(" FAR="); con_hex(rd(cb0 + 0x64), 8); con_hex(rd(cb0 + 0x60), 8); con_putc('\n');
+	con_puts(" SCRATCH="); con_hex(got, 8);
+	con_puts(got == 0xc0ffee01u ? " -> CP_MEM_WRITE LANDED: COMMAND PROCESSOR WORKS\n" : " -> NO WRITE\n");
+	return got == 0xc0ffee01u ? 0 : -1;
+}

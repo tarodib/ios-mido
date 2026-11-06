@@ -100,7 +100,8 @@ edit('makedefs/MakeInc.def',
      '# Apple CPU whose features (LSE, RCpc, FP16, ...) -march does not remove. Build #3\n'
      '# panicked on `ldadd` in lck_grp_reference (843 LSE sites in 517 functions).\n'
      '# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).\n'
-     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -mcpu=cortex-a53+crc+crypto\n')
+     '# MIDO_CPU_ARMV8_0: for files that do not include the board header (commpage_asm.s).\n'
+     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM -DMIDO_CPU_ARMV8_0   -mcpu=cortex-a53+crc+crypto\n')
 
 # First boot on the phone (build #2): XNU drew its stage-0 band, then hung
 # silently at the first kernel-VA access after the MMU came on. With 4K pages
@@ -416,7 +417,9 @@ edit('osfmk/arm64/start.s',
 # new 1 becomes an LDAXR/STXR loop; only caller-saved x9-x15 are used, w10
 # returns the old value, acquire pairs with the existing stlr release.
 def pfz_casa(lock, tag):
-    return ('#if defined(MIDO)\n'
+    # commpage_asm.s does not include SWEET.h (build #5 took the #else branch),
+    # so test the command-line flag instead of MIDO.
+    return ('#if defined(MIDO_CPU_ARMV8_0)\n'
             f'Lmido_{tag}_retry:\t\t\t\t\t\t// ARMv8.0 casa w10, w11, [{lock}]\n'
             f'\tldaxr\tw12, [{lock}]\n'
             f'\tcbnz\tw12, Lmido_{tag}_held\n'

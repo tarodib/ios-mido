@@ -15,6 +15,7 @@
 #include "loader.h"
 #include "input.h"
 #include "perf.h"
+#include "gpu.h"
 
 #define IMEM_RESTART_REASON 0x0860065cUL
 #define RESTART_BOOTLOADER  0x77665500U
@@ -108,6 +109,8 @@ static void __attribute__((noreturn)) warm_reset_to_fastboot(void)
 
 /* ---------------- exceptions ---------------- */
 
+extern volatile int gpu_probe_active, gpu_probe_fault;
+
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
 	if (slot == 5) {                            /* IRQ, current EL, SPx */
@@ -121,6 +124,11 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		} else
 			irq_other++;
 		wr32(GICC + 0x10, iar);
+		return;
+	}
+	if (slot == 4 && gpu_probe_active) {          /* gpu.c probe read aborted: skip the load */
+		gpu_probe_fault = 1;
+		wsr("elr_el1", rsr("elr_el1") + 4);
 		return;
 	}
 	con_clear(C_RED);
@@ -266,6 +274,8 @@ static void test_emmc(void)
 	emmc_code = 7;
 }
 
+static int emmc_mode = -1;   /* sdhc_fast result, shown again on the GPU screen */
+
 static void flush_log(void)
 {
 	if (!log_ok)
@@ -282,6 +292,12 @@ static void flush_log(void)
 	if (!e)   /* rewrite first sectors so the result line is in the saved log too */
 		for (int i = 0; i < 8 && !e; i++)
 			e = sdhc_write(CACHE_FIRST + i, (const void *)(con_log_phys() + 512UL * i));
+}
+
+/* gpu.c saves the log before risky steps (an SMC that resets leaves no other trace) */
+void shim_flush_log(void)
+{
+	flush_log();
 }
 
 /* ---------------- MDSS/MDP5 probe (read-only) ---------------- */
@@ -435,6 +451,7 @@ void shim_main(uint64_t dtb)
 	if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
 		input_setup();   /* touch power/clocks/pins for XNU's mido_input.c */
 		perf_boost();    /* CPU PLL to the highest stable step (was GPLL0 800 MHz), CCI 800 */
+		emmc_mode = sdhc_fast(0, log_ok ? CACHE_FIRST : 0);    /* eMMC 8-bit HS 50 MHz (2026-11-06: 1 MiB 654 -> 337 ms); XNU inherits it */
 		flush_log();
 		con_puts("\nLOADER:\n");
 		const char *why = loader_boot(dtb);   /* returns only if it does not boot */
@@ -443,10 +460,10 @@ void shim_main(uint64_t dtb)
 		/* test image (no payload): input bring-up on a clean screen */
 		delay_ms(3000);
 		con_clear(C_NAVY);
-		perf_probe();          /* keep the measurement on screen during the test */
-		perf_apc_diag(spmi_read, spmi_find_chan);
-		perf_sweep();   /* run 2: 1036.8 MHz stable at S5 0x9e ~0.87 V; now step up to the max */
-		input_test(10);
+		/* CPU sweep, eMMC fast and the DDR probe passed 2026-11-06: GPU only now */
+		con_puts("EMMC FAST MODE="); con_dec((uint64_t)(int64_t)emmc_mode);
+		con_puts(" (0 SLOW, 1 8BIT 25MHZ, 2 8BIT HS 50MHZ)\n");
+		gpu_probe();           /* GPU stage 1; a wrong power sequence hangs here */
 		flush_log();
 	}
 	con_puts("EMMC CODE "); con_dec(emmc_code);

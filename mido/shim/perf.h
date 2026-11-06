@@ -14,3 +14,6 @@ unsigned perf_sweep(void);
 
 /* Highest stable CPU clock + CCI at 800 MHz, before handing off to XNU. */
 void perf_boost(void);
+
+/* GCC DDR clock registers, read only (call last: may hit a protected register). */
+void perf_ddr_probe(void);

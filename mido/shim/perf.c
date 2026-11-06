@@ -40,6 +40,21 @@ unsigned perf_probe(void)
 }
 
 /*
+ * DDR (read only, run LAST: an XPU-protected RPM register would reset the SoC):
+ * GCC BIMC DDR RCG (msm8916-family layout 0x32004 CMD / 0x32008 CFG) and the BIMC
+ * PLL region, to see what the RPM runs the memory at.
+ */
+void perf_ddr_probe(void)
+{
+	con_puts("PERF: DDR RCG="); con_hex(rd(0x01832004), 8); con_putc(' '); con_hex(rd(0x01832008), 8);
+	con_puts(" BIMCPLL:");
+	for (unsigned i = 0; i < 0x10; i += 4) {
+		con_putc(' '); con_hex(rd(0x01823000 + i), 8);
+	}
+	con_putc('\n');
+}
+
+/*
  * Run 1 (2026-11-06): CPU0 799 MHz. C0/C1 mux CFG 0x401 = source 4 (GPLL0 800 MHz)
  * /1, CCI 0x403 = GPLL0/2; the CPU PLL is off (MODE/L = 0; USER_CTL 0xf, CONFIG_CTL
  * 0x200d4828 / 0x006 = Linux clock-cpu-8953 apcs_cpu_pll defaults).

@@ -772,3 +772,42 @@ Next, in order:
 - [ ] M3 eMMC driver mounts HFS+ root, launchd starts, Apple logo
 - [ ] M4 lock screen (MobileGestalt identity, daemons disabled)
 - [ ] M5 touch + buttons
+
+## 2026-11-06 evening: eMMC fast mode, GPU power-up (shim tests)
+
+### eMMC 8-bit / HS 50 MHz
+- Shim `sdhc_fast()`: EXT_CSD (rev 8, card type 0x57), CMD6 bus width 8, then HS_TIMING
+  + GCC SDCC1 RCG GPLL0/16 = 50 MHz. 1 MiB of CMD17 reads: 654 ms -> 337 ms.
+- The first version broke writes (LOG WRITE data error, code 5) while reads were fine.
+  Each step now also rewrites one log block with its own data and reads it back. A
+  failed write test falls back to the last good mode.
+- Final: `EMMC FAST MODE=2` (8-bit HS 50 MHz, writes verified). `sdhc_fast()` runs on
+  every boot before the XNU loader. XNU's transport only resets lines, so it keeps
+  the bus mode.
+
+### Adreno 506 power-up: what it took (in order)
+1. gfx3d RCG to XO, enable the GCC gfx branches (0x01859020..0x48), CX GDSC
+   (0x0185904c) on.
+2. **GX rail = msm_gfx_ldo (0x0185f000) in BHS mode, under GDSC control** (Linux
+   msm_gfx_ldo_init + enable_bhs_mode): unclamp (b31), CPR auto-bypass (b29),
+   msm8953_ldo_config table, then LDO under SW, PWR_SRC=BHS, BHS_EN_FEW/REST and
+   BHS_UNDER_SW_CTL cleared. Final PWRSWITCH_CTL 0x20000038, identical to Linux
+   (checked in OrangeFox debugfs msm_gfx_ldo/debug_info with the GPU forced on).
+   Driving the BHS from software never got the GDSC ack. The fake ack (ACK_SW_OVR)
+   made GX report ON without real power.
+3. **GX_DOMAIN_MISC (0x0185b00c) bit 0 = OXILI_GMEM_CLAMP_IO cleared** (Linux
+   msm_gcc_gfx_probe). Without it GX never came up for real. After it, the GX GDSC
+   comes on through the GDSC-controlled BHS and gfx3d CBCR drops CLK_OFF.
+4. **TZ scm_restore_sec_cfg(TZ_DEVICE_GPU = 18, 0)** right after CX is on: SMC64
+   x0=0x42000c02, x1=SCM_ARGS(2)=2, x2=18, x3=0 -> ret 0. Linux arm-smmu does this on
+   every CX enable (qcom,enable-static-cb + enable-smmu-halt). Before it, every read of
+   the GPU (0x01c00000) or its SMMU (0x01c40000) took a synchronous external abort
+   (ESR 0x96000210).
+- Result: RBBM_STATUS=1, RBBM_INT0=0, CP_HW_FAULT=0, VSC_BIN_SIZE=0x101,
+  GPU SMMU+0 (sCR0 NS view)=0x00200436. **The GPU answers.**
+- Do NOT read GPU SMMU +0x400 (secure register space): it resets the SoC.
+- Tools: a fault-tolerant probe read (exception slot 4 skips the load while
+  gpu_probe_active), and the shim log pulled through OrangeFox:
+  `adb exec-out dd if=/dev/block/bootdevice/by-name/cache bs=512 count=128`.
+- Next: GPU stage 2, CP microcode (a530_pm4/pfp) + ring buffer NOP/scratch test, then
+  the zap shader (PAS via TZ) and an XNU GPU driver.

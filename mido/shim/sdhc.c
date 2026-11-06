@@ -113,20 +113,20 @@ static int cmd(uint32_t idx, uint32_t arg, uint32_t rsp, int data_dir, uint32_t 
 
 	if (data_dir < 0) {
 		s = wait_sts(ST_RD_READY, 1000);
-		if (!s || (s & ST_ERR)) { reset_lines(); return s ? 5 : 4; }
+		if (!s || (s & ST_ERR)) { last_err = s >> 16; reset_lines(); return s ? 5 : 4; }
 		wr(R_STS, ST_RD_READY);
 		for (int i = 0; i < 128; i++)
 			buf[i] = rd(R_BUF);
 	} else if (data_dir > 0) {
 		s = wait_sts(ST_WR_READY, 1000);
-		if (!s || (s & ST_ERR)) { reset_lines(); return s ? 5 : 4; }
+		if (!s || (s & ST_ERR)) { last_err = s >> 16; reset_lines(); return s ? 5 : 4; }
 		wr(R_STS, ST_WR_READY);
 		for (int i = 0; i < 128; i++)
 			wr(R_BUF, buf[i]);
 	}
 	if (data_dir || rsp == RSP_R1B) {
 		s = wait_sts(ST_XFER_DONE, 2000);
-		if (!s || (s & ST_ERR)) { reset_lines(); return s ? 5 : 4; }
+		if (!s || (s & ST_ERR)) { last_err = s >> 16; reset_lines(); return s ? 5 : 4; }
 	}
 	wr(R_STS, 0xffffffff);
 	return 0;
@@ -439,4 +439,119 @@ int sdhc_write(uint64_t lba, const void *buf)
 			return 0;
 	}
 	return 6;
+}
+
+/* ---------------- fast mode: 8-bit bus, HS52 (50 MHz) ---------------- */
+
+static uint32_t ext_csd[128];
+
+/* Read 1 MiB (2048 single-block reads from lba) and return the time in us. */
+static uint32_t bench_us(uint64_t lba)
+{
+	static uint32_t b[128];
+	uint64_t t0 = ticks();
+	for (unsigned i = 0; i < 2048; i++)
+		if (cmd(17, (uint32_t)(lba + i), RSP_R1, -1, b))
+			return 0;
+	return (uint32_t)((ticks() - t0) * 10 / 192);
+}
+
+static int gpt_ok(void)
+{
+	static uint32_t b[128];
+	return cmd(17, 1, RSP_R1, -1, b) == 0 && b[0] == 0x20494645u && b[1] == 0x54524150u;  /* "EFI PART" */
+}
+
+/* Rewrite one block with its own contents and read it back (non-destructive). */
+static int write_ok(uint64_t lba)
+{
+	static uint32_t a[128], b[128];
+	if (!lba || cmd(17, (uint32_t)lba, RSP_R1, -1, a))
+		return 0;
+	int e = sdhc_write(lba, a);
+	if (e) {
+		con_puts(" WRITE TEST E="); con_dec(e); con_puts(" ERR="); con_hex(last_err, 4); con_putc('\n');
+		return 0;
+	}
+	if (cmd(17, (uint32_t)lba, RSP_R1, -1, b))
+		return 0;
+	for (int i = 0; i < 128; i++)
+		if (a[i] != b[i])
+			return 0;
+	return 1;
+}
+
+static int switch_byte(unsigned index, unsigned value)
+{
+	int e = cmd(6, (3u << 24) | (index << 16) | (value << 8), RSP_R1B, 0, 0);
+	if (e)
+		return e;
+	uint64_t end = ticks() + 19200ULL * 500;
+	while (ticks() < end) {
+		int st = card_state();
+		if (st == 4 && (last_resp & (1U << 8)))
+			return (last_resp & (1U << 7)) ? 7 : 0;               /* SWITCH_ERROR */
+	}
+	return 8;
+}
+
+/*
+ * After full_reinit the card is 1-bit / legacy 25 MHz (~2-3 MB/s). Switch to an
+ * 8-bit bus and HS timing at 50 MHz, verifying the GPT read after each step and
+ * falling back if it fails. Each step must also pass a write test at wtest_lba
+ * (rewrite + read back; 0 = no write window = stay slow): 2026-11-06 HS 8-bit read
+ * fine but LOG WRITE got a data error (5). XNU's driver keeps whatever bus mode it finds.
+ * Returns the final mode: 0 = unchanged, 1 = 8-bit 25 MHz, 2 = 8-bit HS 50 MHz.
+ */
+int sdhc_fast(uint64_t bench_lba, uint64_t wtest_lba)
+{
+	int mode = 0;
+	uint32_t t_slow = bench_lba ? bench_us(bench_lba) : 0;
+	if (cmd(8, 0, RSP_R1, -1, ext_csd)) {
+		con_puts("EMMC FAST: EXT_CSD READ FAILED\n");
+		return 0;
+	}
+	const uint8_t *x = (const uint8_t *)ext_csd;
+	con_puts("EMMC FAST: EXT_CSD REV="); con_dec(x[192]); con_puts(" TYPE="); con_hex(x[196], 2);
+	con_puts(" WIDTH="); con_dec(x[183]); con_puts(" HS="); con_dec(x[185]); con_putc('\n');
+
+	/* 8-bit bus */
+	int e = switch_byte(183, 2);
+	if (!e) {
+		wr(R_HCTL, (rd(R_HCTL) & ~(1U << 1)) | (1U << 5));          /* host: 8-bit */
+		if (gpt_ok() && write_ok(wtest_lba)) {
+			mode = 1;
+		} else {                                                      /* back to 1-bit */
+			wr(R_HCTL, rd(R_HCTL) & ~(1U << 5));
+			switch_byte(183, 0);
+		}
+	}
+	con_puts(" BUS 8BIT: E="); con_dec((uint64_t)(int64_t)e); con_puts(mode ? " OK\n" : " FAIL\n");
+
+	/* HS timing at 50 MHz (card type bit 1 = HS 52 MHz) */
+	if (mode == 1 && (x[196] & 2)) {
+		e = switch_byte(185, 1);
+		if (!e) {
+			wr(R_HCTL, rd(R_HCTL) | (1U << 2));                        /* host high speed */
+			wr(R_CLK, rd(R_CLK) & ~4U);
+			gcc_sdcc1_set(1, 31, 1, 1);                                  /* GPLL0 800 / 16 = 50 MHz */
+			set_clock_div(0);
+			if (gpt_ok() && write_ok(wtest_lba)) {
+				mode = 2;
+			} else {                                                    /* back to 25 MHz legacy */
+				wr(R_CLK, rd(R_CLK) & ~4U);
+				gcc_sdcc1_set(1, 31, 1, 2);
+				set_clock_div(0);
+				wr(R_HCTL, rd(R_HCTL) & ~(1U << 2));
+				switch_byte(185, 0);
+			}
+		}
+		con_puts(" HS 50MHZ: E="); con_dec((uint64_t)(int64_t)e); con_puts(mode == 2 ? " OK\n" : " FAIL\n");
+	}
+	if (bench_lba) {
+		uint32_t t_fast = bench_us(bench_lba);
+		con_puts(" 1 MIB READ: "); con_dec(t_slow / 1000); con_puts(" MS -> "); con_dec(t_fast / 1000);
+		con_puts(" MS\n");
+	}
+	return mode;
 }

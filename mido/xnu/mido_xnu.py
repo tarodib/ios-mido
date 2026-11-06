@@ -88,8 +88,20 @@ edit('pexpert/pexpert/arm64/SWEET.h',
 # ---------------------------------------------------------------- MakeInc.def
 edit('makedefs/MakeInc.def',
      'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto\n',
-     '# MIDO (Cortex-A53): ARMv8.0 only, so the kernel never emits LSE/RDM/FP16\n'
-     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8-a+crc+crypto\n')
+     '# MIDO (Cortex-A53): ARMv8.0 only, so the kernel never emits LSE/RDM/FP16.\n'
+     '# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).\n'
+     'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -march=armv8-a+crc+crypto\n')
+
+# ---------------------------------------------------------------- vm_param.h
+# CI run 42149040200: pmap.c static_assert (4K only) requires the commpage
+# (0xFFFFFC000) to be nested above MACH_VM_MAX_ADDRESS at L1 (1 GB) granularity.
+# The macOS-platform value (128 TB) fails; the iOS value 0xFC0000000 is exactly
+# that 1 GB boundary, and the userland is iOS anyway.
+edit('osfmk/mach/arm/vm_param.h',
+     '#if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)\n'
+     '#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL\n',
+     '#if (defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)) && !defined(MIDO_4K_VM)\n'
+     '#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL\n')
 
 # ---------------------------------------------------------------- protos.h
 edit('pexpert/pexpert/arm/protos.h',

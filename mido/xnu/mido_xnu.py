@@ -1245,6 +1245,7 @@ edit(UFS,
      '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n'
      '#else\n'
      '\t{\n\t\textern void mido_input_init(void);\n\t\tmido_input_init();\n\t}\n'
+     '\t{\n\t\textern void mido_gpu_init(void);\n\t\tmido_gpu_init();\n\t}\n'
      '#endif\n')
 
 # ---------------------------------------------------------------------------
@@ -1557,7 +1558,11 @@ create('bsd/dev/mido_input.c',
 edit('bsd/conf/files',
      'bsd/dev/sweet_touch.c\t\t\tstandard\n',
      'bsd/dev/sweet_touch.c\t\t\tstandard\n'
-     'bsd/dev/mido_input.c\t\t\tstandard\n')
+     'bsd/dev/mido_input.c\t\t\tstandard\n'
+     'bsd/dev/mido_gpu.c\t\t\tstandard\n')
+# Adreno 506 bring-up (bsd/dev/mido_gpu.c, boot-arg midogpu=1; firmware via mkpayload --blob)
+create('bsd/dev/mido_gpu.c',
+       (Path(__file__).resolve().parent / 'src' / 'mido_gpu.c').read_text())
 HID = 'iokit/Kernel/arm/hid/SweetHID.cpp'
 edit(HID,
      '\tfLogicalW = native ? 1080 : 1125;\n'

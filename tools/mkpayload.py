@@ -140,7 +140,17 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def add_blob_to_adt(adt_blob, name, phys, size):
+    """Return the ADT with /chosen/memory-map <name> = <phys, size> (firmware for a driver)."""
+    root, _ = adt.parse(adt_blob)
+    chosen = next(c for c in root.children if c.name == 'chosen')
+    mmap = next(c for c in chosen.children if c.name == 'memory-map')
+    assert mmap.prop(name) is None, f'ADT already has {name}'
+    mmap.props.append((name, 0, struct.pack('<2Q', phys, size)))
+    return adt.serialize(root)
+
+
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, blobs=()):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -168,6 +178,19 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         adt_blob = add_ramdisk_to_adt(adt_blob, rd_pa, rd_size)
         ramdisk = (hex(rd_pa), hex(rd_size))
 
+    # Named blobs (e.g. GPU firmware, never in git): placed after the kernel like the
+    # ramdisk, announced as /chosen/memory-map <name> = <phys, size>.
+    blob_info = []
+    for name, path in blobs:
+        data = open(path, 'rb').read()
+        size = (len(data) + PAGE - 1) & ~(PAGE - 1)
+        va = kernel_end
+        kernel_end = va + size
+        pa = va - virt_base + PHYS_BASE
+        pieces.append((va, size, data))
+        adt_blob = add_blob_to_adt(adt_blob, name, pa, len(data))
+        blob_info.append((name, hex(pa), len(data)))
+
     hdr_size = SEG_TABLE + 32 * len(pieces)
     out = bytearray(hdr_size)
     seg_table = []
@@ -188,7 +211,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     for i, t in enumerate(seg_table):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
-                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
+                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, blobs=blob_info, size=len(out),
                 segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
     return bytes(out), info
 
@@ -198,8 +221,11 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--blob', action='append', default=[], metavar='NAME=PATH',
+                    help='extra file for a driver, announced in /chosen/memory-map as NAME')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    blobs = [tuple(b.split('=', 1)) for b in a.blob]
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, blobs)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

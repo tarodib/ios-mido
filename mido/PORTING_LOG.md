@@ -698,6 +698,32 @@ NOT backed up: userdata (personal data — user to save it).
       table);
     - eMMC deadline re-check (per-block 3 s, and status re-read after the deadline);
     - input thread at kernel priority 81.
+- Run #26 failed: kernel_thread_start_priority was implicitly declared in BSD; run #27
+  (f95e428, Intel runner) builds.
+  - Boot: user reports "basically the same".
+  - Log: `SWEET FB: MIDO vsync 15 Hz`, **`MIDO LSE: 0 emulated` every minute for the whole boot**,
+    0 MIDO EMMC errors, 28 input events, crashes only gpsd/driverkitd.
+  - So the iPhone 8 userland never hits the LSE emulator (the Pixel port says the same).
+- **Reference port: ios-sailfish** (github.com/joranv1/ios-sailfish, Pixel 2016, Snapdragon 821,
+  Adreno 530, fork of ios-sweet, **no licence file**: study only, our own code), cloned to
+  research/.
+  - It has: Adreno 530 kernel driver + Mesa freedreno GLES in backboardd (sweetgl.dylib, EAGL
+    shim, DYLD_INSERT via sweetenv); RPM GLINK for rails, clocks and DDR (0145-0147: the RPM
+    ignores rate votes until `clk0` id 2 `Enab`=1, then every RPM clock must be voted at max);
+    CPU PLL / SAW turbo (0093, 0102, 0183).
+  - Boots to the lock screen in ~20 s.
+- **CPU clock (shim perf.c)**:
+  - **LK leaves both A53 clusters on GPLL0 = 799 MHz** (mux CFG 0x401 src 4), the CPU PLL off,
+    and the CCI on GPLL0/2.
+  - APC rail PM8953 S5 (PPID 0x120) V41=0x9e ≈ 0.87 V.
+  - apcs_cpu_pll (Linux clock-cpu-8953): L at +0x08, MODE BYPASSNL→RESET_N→LOCK(b31)→OUTCTRL,
+    CONFIG 0x200d4828/0x6, mux src 5.
+  - Test 2: L=54 → 1036 MHz OK. Test 3 sweep at the unchanged voltage, workload checksum ×3 per
+    step: **1401, 1689, 1804, 1958, 2015 MHz all OK**.
+  - Every XNU boot now runs perf_boost(): sweep to the highest passing step (fallback on a
+    mismatch) + CCI to GPLL0/1 = 800 MHz. Image shim-boot-run27-boost.img (run #27 kernel,
+    unchanged).
+  - Caveat: no CPR or thermal management; short single-core test while cool.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

@@ -7,6 +7,10 @@ set -euo pipefail
 KV=$(uname -r)                       # e.g. 6.18.54.1-microsoft-standard-WSL2
 TAG=linux-msft-wsl-${KV%%-*}
 if grep -q hfsplus /proc/filesystems; then echo HFSPLUS_LOADED; exit 0; fi
+# Prebuilt module kept after the source tree was removed (WSL cleanup 2026-11-06).
+if [ -f "$HOME/tools/hfsplus-${KV%%-*}.ko" ] && insmod "$HOME/tools/hfsplus-${KV%%-*}.ko"; then
+	grep -q hfsplus /proc/filesystems && echo HFSPLUS_LOADED && exit 0
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -q build-essential flex bison bc libelf-dev libssl-dev dwarves cpio >/dev/null
 mkdir -p ~/src && cd ~/src

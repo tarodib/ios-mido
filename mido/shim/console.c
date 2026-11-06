@@ -14,7 +14,8 @@
 #define FB_PHYS  0x90001000UL
 #define FB_W     1080
 #define FB_H     1920
-#define STRIDE   (FB_W * 3)
+static unsigned bpp = 3;                    /* 3 = LK's BGR888; 4 after con_set_32bpp() */
+#define STRIDE   (FB_W * bpp)
 #define SCALE    4
 #define CELL_W   (6 * SCALE)
 #define CELL_H   (8 * SCALE)
@@ -60,13 +61,30 @@ static uint32_t log_len;
 
 static void px(int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
-	volatile uint8_t *p = (volatile uint8_t *)(FB_PHYS + (uintptr_t)y * STRIDE + (uintptr_t)x * 3);
+	uintptr_t a = FB_PHYS + (uintptr_t)y * STRIDE + (uintptr_t)x * bpp;
+	if (bpp == 4) {
+		*(volatile uint32_t *)a = 0xff000000U | (uint32_t)r << 16 | (uint32_t)g << 8 | b;
+		return;
+	}
+	volatile uint8_t *p = (volatile uint8_t *)a;
 	p[0] = b; p[1] = g; p[2] = r;
+}
+
+void con_set_32bpp(void)
+{
+	bpp = 4;
 }
 
 void con_clear(uint32_t rgb)
 {
 	bg_r = rgb >> 16; bg_g = rgb >> 8; bg_b = rgb;
+	if (bpp == 4) {
+		uint32_t w = 0xff000000U | rgb;
+		for (uintptr_t a = FB_PHYS; a < FB_PHYS + (uintptr_t)STRIDE * FB_H; a += 4)
+			*(volatile uint32_t *)a = w;
+		row = col = 0;
+		return;
+	}
 	uint8_t p[12];
 	for (int i = 0; i < 12; i += 3) { p[i] = bg_b; p[i + 1] = bg_g; p[i + 2] = bg_r; }
 	uint32_t w[3];

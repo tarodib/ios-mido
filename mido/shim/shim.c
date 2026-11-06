@@ -11,6 +11,7 @@
 #include "console.h"
 #include "sdhc.h"
 #include "spmi.h"
+#include "fdt.h"
 
 #define IMEM_RESTART_REASON 0x0860065cUL
 #define RESTART_BOOTLOADER  0x77665500U
@@ -280,6 +281,82 @@ static void flush_log(void)
 			e = sdhc_write(CACHE_FIRST + i, (const void *)(con_log_phys() + 512UL * i));
 }
 
+/* ---------------- MDSS/MDP5 probe (read-only) ---------------- */
+
+#define MDSS_BASE 0x01a00000UL
+static void test_mdp(void)
+{
+	static const uint32_t pipe_off[4] = {0x5000, 0x15000, 0x17000, 0x25000};   /* VIG0 RGB0 RGB1 DMA0 */
+	static const char pipe_name[4][5] = {"VIG0", "RGB0", "RGB1", "DMA0"};
+	con_kv("MDP HWVER", rd32(MDSS_BASE + 0x1000));
+	for (int i = 0; i < 4; i++) {
+		uintptr_t p = MDSS_BASE + pipe_off[i];
+		con_puts(pipe_name[i]);
+		con_puts(" ADDR="); con_hex(rd32(p + 0x14), 8);
+		con_puts(" FMT="); con_hex(rd32(p + 0x30), 8);
+		con_puts(" STRIDE="); con_hex(rd32(p + 0x24), 8); con_putc('\n');
+		con_puts("  SIZE="); con_hex(rd32(p + 0x00), 8);
+		con_puts(" UNPACK="); con_hex(rd32(p + 0x34), 8);
+		con_puts(" OPMODE="); con_hex(rd32(p + 0x38), 8); con_putc('\n');
+	}
+	static const uint32_t ctl_off[3] = {0x2000, 0x2200, 0x2400};
+	for (int i = 0; i < 3; i++) {
+		uintptr_t c = MDSS_BASE + ctl_off[i];
+		con_puts("CTL"); con_dec(i);
+		con_puts(" LM0="); con_hex(rd32(c + 0x00), 8);
+		con_puts(" TOP="); con_hex(rd32(c + 0x14), 8);
+		con_puts(" FLUSH="); con_hex(rd32(c + 0x18), 8); con_putc('\n');
+	}
+}
+
+/*
+ * Switch LK's RGB0 pipe from BGR888 (3 B/px) to BGRX8888 (4 B/px) as XNU/iOS expect.
+ * MDP5 SSPP: SRC_FORMAT +0x30, SRC_UNPACK_PATTERN +0x34, SRC_YSTRIDE0 +0x24.
+ * CTL0_FLUSH +0x18, RGB0 = bit 3; applied at the next vsync (video-mode panel).
+ */
+#define MDP_RGB0 (MDSS_BASE + 0x15000)
+#define MDP_CTL0 (MDSS_BASE + 0x2000)
+static int fb_to_32bpp(void)
+{
+	if (rd32(MDP_RGB0 + 0x14) != 0x90001000 || rd32(MDP_RGB0 + 0x30) != 0x0002243f)
+		return -1;                            /* not the LK state we measured: leave it */
+	/* pre-fill the 32 bpp frame black so the switch shows no garbage */
+	for (uintptr_t a = 0x90001000UL; a < 0x90001000UL + 1080UL * 4 * 1920; a += 4)
+		*(volatile uint32_t *)a = 0xff000000U;
+	wr32(MDP_RGB0 + 0x30, 0x000236ff);        /* 4 B/px, 4 components, 8 bpc, alpha off */
+	wr32(MDP_RGB0 + 0x34, 0x03020001);        /* memory order B, G, R, X */
+	wr32(MDP_RGB0 + 0x24, 1080 * 4);          /* stride 4320 */
+	wr32(MDP_CTL0 + 0x18, 1U << 3);           /* flush RGB0 */
+	delay_ms(50);                             /* > 2 frames at 60 Hz */
+	con_set_32bpp();
+	return 0;
+}
+
+/* ---------------- payload probe (loader step 1, no jump) ---------------- */
+
+static void probe_payload(uint64_t dtb)
+{
+	uint64_t lo = 0, hi = 0;
+	int ok = fdt_chosen_u64(dtb, "linux,initrd-start", &lo) &&
+		 fdt_chosen_u64(dtb, "linux,initrd-end", &hi);
+	con_puts("INITRD "); con_puts(ok ? "" : "NOT IN /CHOSEN ");
+	con_hex(lo, 8); con_puts(".."); con_hex(hi, 8);
+	con_puts(" ("); con_dec(ok ? hi - lo : 0); con_puts(" B)\n");
+	if (!ok || hi <= lo)
+		return;
+	const volatile char *m = (const volatile char *)lo;
+	int magic = m[0] == 'S' && m[1] == 'W' && m[2] == 'E' && m[3] == 'E' &&
+		    m[4] == 'T' && m[5] == 'X' && m[6] == 'N' && m[7] == 'U';
+	con_puts(" PAYLOAD MAGIC: "); con_puts(magic ? "SWEETXNU\n" : "NONE\n");
+	if (magic) {
+		con_kv(" VERSION/NSEGS", *(volatile uint64_t *)(lo + 8));
+		con_kv(" VIRT BASE", *(volatile uint64_t *)(lo + 0x10));
+		con_kv(" ENTRY", *(volatile uint64_t *)(lo + 0x18));
+		con_kv(" PHYS BASE", *(volatile uint64_t *)(lo + 0x38));
+		con_kv(" MEM SIZE", *(volatile uint64_t *)(lo + 0x40));
+	}
+}
+
 /* ---------------- main ---------------- */
 
 void shim_main(uint64_t dtb)
@@ -302,6 +379,7 @@ void shim_main(uint64_t dtb)
 	con_puts("LSE ATOMICS: "); con_puts(((isar0 >> 20) & 0xf) >= 2 ? "YES\n" : "NO\n");
 	con_kv("DTB", dtb);
 	con_kv("DTB MAGIC", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
+	probe_payload(dtb);
 	con_putc('\n');
 
 	con_kv("PSCI VER", smc(PSCI_VERSION, 0, 0, 0));
@@ -325,11 +403,24 @@ void shim_main(uint64_t dtb)
 		con_puts(" SPARE="); con_hex(v, 2); con_putc('\n');
 	}
 	con_putc('\n');
+	test_mdp();
+	int fb = fb_to_32bpp();
+	if (!fb) {   /* screen was cleared by the switch: redraw a header so the change is visible */
+		con_clear(C_NAVY);
+		con_puts("MIDO SHIM - 32BPP CONSOLE\n(EARLIER LINES ARE IN THE CACHE LOG)\n\n");
+	}
+	con_puts("FB 32BPP: "); con_puts(fb ? "SKIPPED\n" : "OK\n");
+	con_kv(" RGB0 FMT", rd32(MDP_RGB0 + 0x30));
+	con_kv(" RGB0 STRIDE", rd32(MDP_RGB0 + 0x24));
+	con_kv(" CTL0 FLUSH", rd32(MDP_CTL0 + 0x18));
+	con_putc('\n');
 	test_emmc();
 	con_putc('\n');
 	flush_log();
 	con_puts("EMMC CODE "); con_dec(emmc_code);
-	con_puts(", HOLD "); con_dec(5 + 4 * emmc_code); con_puts("S, THEN FASTBOOT\n");
-	delay_ms(1000 * (5 + 4 * emmc_code));
+	/* HOLD_BASE gives a person time to read the screen; runshim.ps1 subtracts it. */
+#define HOLD_BASE 30
+	con_puts(", HOLD "); con_dec(HOLD_BASE + 4 * emmc_code); con_puts("S, THEN FASTBOOT\n");
+	delay_ms(1000 * (HOLD_BASE + 4 * emmc_code));
 	warm_reset_to_fastboot();
 }

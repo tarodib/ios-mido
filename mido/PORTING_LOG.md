@@ -173,6 +173,33 @@ NOT backed up: userdata (personal data — user to save it).
 - **Test loop is now fully automatic:** `tools/runshim.ps1` builds, boots, decodes the timing code,
   boots OrangeFox from RAM and pulls the log from `cache` (`shim/out/shimlog.txt`). No photos needed.
 
+### Display: LK pipe state + switch to 32 bpp
+- MDSS/MDP5 probe (MDP HWVER 0x10100000): LK scans out **RGB0** (0x01A15000): SRC0_ADDR 0x90001000,
+  SRC_FORMAT 0x0002243F (3 B/px, 3 comps, tight), UNPACK 0x00020001 (bytes B,G,R), YSTRIDE 0xCA8,
+  SIZE 0x0780_0438. CTL0 (0x01A02000) LM0=0x200 (RGB0 staged), TOP=0x1F20. VIG0/RGB1/DMA0 unused.
+- `fb_to_32bpp()`: SRC_FORMAT 0x000236FF (4 B/px, 4 comps, A 8-bit, alpha off), UNPACK 0x03020001
+  (B,G,R,X), YSTRIDE 4320, CTL0_FLUSH bit3 (RGB0). Readback FMT=0x236FF, STRIDE=0x10E0, FLUSH→0
+  (consumed at vsync). 32 bpp frame = 8.3 MB inside splash carve-out (20 MB). Console draws 32-bit pixels.
+  **User confirmed: 32 bpp console looks correct** (navy background, crisp white text, right colours).
+- Shim hold on success is now 30 s (HOLD_BASE) so the screen can be read; runshim.ps1 subtracts it.
+  → XNU boot_args Video: base 0x90001000, rowBytes 4320, 1080×1920, depth 32.
+
+### Loader step 1: payload discovery (`shim/fdt.c`, `probe_payload()`)
+- `fdt_chosen_u64()` reads `/chosen` from the DTB LK passes in x0 (0x43400000).
+- Test with a 4 MB header-only dummy payload (`build.py <payload>` puts it in the ramdisk):
+  **LK placed the ramdisk at 0x43600000–0x43A00000** (just above the DTB, NOT the header's 0x81000000).
+  Magic SWEETXNU + header fields read back exactly. No jump yet.
+- XNU RAM window chosen: **0xA0000000, 1.5 GB** (above every carve-out incl. pstore 0x9FF00000;
+  DRAM ends at 0x100000000). Ramdisk/payload staging area stays below 0x84A00000.
+
+### XNU CI
+- `macos-14` runner retired → baseline run 42146912294 failed at job start.
+- Workflow on branch `mido` takes a `runner` input (default macos-15) and lists installed Xcodes
+  (commit 4715674; push needed `gh auth refresh -h github.com -s workflow`).
+- Baseline SWEET build on macos-15: run 42147239678 (in progress). Goal: buildtree.tgz (fully
+  patched xnu-8796 tree) to write the MIDO patches (4K pages, GICv2, LSE emu, eMMC) as real diffs.
+  Known risk: Xcode 16 iig emits IORPC.kernelContent, missing in xnu-8796 → compat patch if needed.
+
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.
 - `tools/isa-scan.py`: v1 scanned whole executable mappings → ~190k "LSE" hits, almost all

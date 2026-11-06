@@ -581,7 +581,7 @@ index 69b13f9..6086ed9 100644
  
  CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index 42362c5..036ce82 100644
+index 42362c5..5849f5e 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -399,7 +399,13 @@ arm_init(
@@ -589,9 +589,9 @@ index 42362c5..036ce82 100644
  		 * Select the advertised kernel page size.
  		 */
 +#if defined(MIDO_BOARD)
-+		uint32_t mido_vm16k = 0;
-+		PE_parse_boot_argn("mido_vm16k", &mido_vm16k, sizeof(mido_vm16k));
-+		if (mido_vm16k && args->memSize > 1ULL * 1024 * 1024 * 1024) {
++		uint32_t mido_vm4k = 0;
++		PE_parse_boot_argn("mido_vm4k", &mido_vm4k, sizeof(mido_vm4k));
++		if (!mido_vm4k && args->memSize > 1ULL * 1024 * 1024 * 1024) {
 +#else
  		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
 +#endif
@@ -646,6 +646,20 @@ index da0bbba..669fe55 100644
  	cbz		w10, Ltrylock_dequeue_success
  
  	mov		x0, #-1			// Failed
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 00568d3..d91d451 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10892,6 +10892,9 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 
+ 	do {
+ 		int text_leaf_index = random() % num_ptes;
++#if defined(MIDO_BOARD)
++		text_leaf_index &= ~(PAGE_RATIO - 1);   /* VM-page aligned for PAGE_RATIO > 1 */
++#endif
+ 
+ 		// Generate a VA for the commpage text with the same root and twig index as data
+ 		// comm page, but with new leaf index we've just generated.
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index 06bb568..00f2ed2 100644
 --- a/osfmk/arm64/arm_vm_init.c

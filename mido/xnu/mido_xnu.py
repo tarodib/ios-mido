@@ -1287,18 +1287,31 @@ edit('bsd/kern/bsd_init.c',
      '#elif DEBUG_BSDINIT\n#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)\n')
 
 # arm_init.c: > 1 GB RAM selects 16 KB VM pages over the 4 KB granule (the A9
-# PAGE_RATIO 4 mode). On mido (1.5 GB) build #12 panicked in that path:
-# vm_commpage_init -> commpage_populate -> pmap_enter -> write_pte_fast
-# "PTE write is unaligned". Use 4 KB VM pages = hardware pages (the <= 1 GB path);
-# boot-arg mido_vm16k=1 keeps the A9 mode for experiments.
+# PAGE_RATIO 4 mode). That is what iOS 16 userland needs: the dyld shared cache is
+# code-signed with 16 KB hash pages (CD pageShift 14), which a 4 KB kernel rejects
+# ("disallowing unsupported code signature page shift"), so dyld finds "no dyld
+# cache". Keep XNU's choice (16 KB on mido's 1.5 GB); boot-arg mido_vm4k=1 forces
+# 4 KB VM pages = hardware pages (the <= 1 GB path).
 edit('osfmk/arm/arm_init.c',
      '\t\tif (args->memSize > 1ULL * 1024 * 1024 * 1024) {\n',
      '#if defined(MIDO_BOARD)\n'
-     '\t\tuint32_t mido_vm16k = 0;\n'
-     '\t\tPE_parse_boot_argn("mido_vm16k", &mido_vm16k, sizeof(mido_vm16k));\n'
-     '\t\tif (mido_vm16k && args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
+     '\t\tuint32_t mido_vm4k = 0;\n'
+     '\t\tPE_parse_boot_argn("mido_vm4k", &mido_vm4k, sizeof(mido_vm4k));\n'
+     '\t\tif (!mido_vm4k && args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
      '#else\n'
      '\t\tif (args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
+     '#endif\n')
+
+# pmap.c: with PAGE_RATIO 4 (16 KB VM pages, 4 KB PTEs) pmap_create_commpages picks
+# the commpage text VA from any 4 KB leaf slot, but pmap_enter -> write_pte_fast
+# writes 4 PTEs and needs a 16 KB-aligned VA (ptep 32-byte aligned): build #12
+# panicked "write_pte_fast: PTE write is unaligned" from vm_commpage_init.
+# Pick only slots that start a VM page.
+edit('osfmk/arm/pmap/pmap.c',
+     '\t\tint text_leaf_index = random() % num_ptes;\n',
+     '\t\tint text_leaf_index = random() % num_ptes;\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\t\ttext_leaf_index &= ~(PAGE_RATIO - 1);   /* VM-page aligned for PAGE_RATIO > 1 */\n'
      '#endif\n')
 
 # ---------------------------------------------------------------------------

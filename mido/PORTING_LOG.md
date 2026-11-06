@@ -467,6 +467,65 @@ NOT backed up: userdata (personal data — user to save it).
     - MPIDR check `(phys_id & ~0x103) == 0`;
     - cpuName "Cortex-A53".
     The SGI is already redirected to mido_gic_send_sgi (GICv2 GICD_SGIR).
+- Build #16's first run was never picked up: GitHub said "job was not acquired … capacity
+  constraints" for macOS. `gh run rerun` built it.
+- **XNU boot #11 (build #16, run 42197372970, commit 8948816): M2 reached, eMMC driver works.**
+  - CPU: "SWEET CPU: requested=1 selected=1 (limit=8)", "cpu=0 mpidr=0x0 came alive; SGI1 OK",
+    "1/1 CPUs initialized, SGI1 verified".
+  - Then "KB: bsd_init", the BSD copyright, and every bsd_init step: kauth, MAC Framework,
+    bufferinit ("7670 buffer headers and 5883 cluster IO buffer headers"), IOKitInitializeTime,
+    eventhandler, aio, pshm, psem, nwk_wq, dlil, socket, domain, skywalk, memorystatus,
+    sysctl_mib, bsd_autoconf, loopattach (lo0, gif0, stf0), ether_family, net_init_run,
+    inittodr, setconf.
+  - **`SWEET UFS: "userdata" on LUN 0: first block 0x148082, 24571 MiB, read-only, DMA at
+    0xa4800000`**: the GPT was read over SDHCI PIO and the partition size matches (23-24 GB).
+  - `BSD root: ufsroot0, major 1, minor 0`, then vfs_mountroot gives
+    `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : 0` → `cannot mount root,
+    errno = 19` → mount(2..5) failed, retried every ~5 s. This is expected, since userdata still
+    holds Android's ext4.
+  - Heartbeat: the boot thread waits in the mountroot retry. kscan wasn't needed.
+  - Next: flash rootimg/ios16-root.simg to userdata, then boot with ios-sweet's userland
+    boot-args plus `ufsrw=1 rootrw=1` (the write guard keeps writes inside userdata). A read of
+    the HFS+ signature "H+" will also verify that eMMC reads return real data.
+- **Root flashed** (user approved): `fastboot getvar partition-size:userdata` = 0x5ffb79e00
+  (24571 MiB, matches the driver). `fastboot -S 512M flash userdata rootimg\ios16-root.simg`
+  erased, then sent and wrote 24/24 chunks, all OKAY, in 506.9 s (log: xnu\flash-userdata.log).
+- **First iOS root boot** (build #16 kernel, shim\out\shim-boot-ios16.img), cmdline:
+  `debug=0xc serial=3 cpus=1 keepsyms=1 -v -enable_kprintf_spam -noprogress rd=ufsroot0
+  unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1
+  launchd_unsecure_cache=1 wdt=-1`. Booted with fastboot boot.
+  - **The root mounts read-write**: `SWEET UFS: "userdata" … read-write, DMA at 0xa4806000`,
+    `SWEET LOG: console log to the last 4100 KiB of the partition (block 0x7477fa)`,
+    `hfs: Initializing the journal (joffset 0x82000 sz 0x800000)`, and
+    `hfs: iOSRoot: hfs_recording_init: creating the hotfile btree`. So eMMC reads and writes
+    work. The DLIL and Skywalk self-tests passed and the rest of bsd_init completed.
+  - **launchd (pid 1) ran; dyld failed**:
+    `initproc failed to start -- exit reason namespace 6 subcode 0x1 description: Library not
+    loaded: /usr/lib/libSystem.B.dylib Referenced from: <5C15DB07-…> /sbin/launchd Reason:
+    tried: '/usr/lib/libSystem.B.dylib' (no such file, no dyld cache), '/usr/local/lib/…'
+    (no such file)`. Panicked task pid 1 launchd, 39 pages, 1 thread.
+  - The image is fine (tools/wsl-rootcheck.sh): System/Library/Caches/com.apple.dyld has
+    dyld_shared_cache_arm64 (header `dyld_v1   arm64`) plus subcaches, ~3.1 GB, hard-linked
+    into the OS cryptex path. So dyld found the files but didn't get a usable shared region.
+  - Main suspect: 4 KB VM pages against a cache laid out and code-signed for 16 KB pages
+    (shared_region_map_and_slide_2_np, or F_ADDFILESIGS_RETURN / cs_blob page size). The kernel
+    printf()s shared-region errors and the SWEET log ring was on during this boot, so the next
+    step is tools/sweetlog.ps1: boot the stock recovery into RAM, dd the last 1025×4K of
+    userdata, decode with sweet-log.py.
+  - **Confirmed without the log** (tools/cache-cdpage.py on the image):
+    - Every dyld_shared_cache_arm64* file has a CodeDirectory v0x20400 with SHA-256 and
+      **pageShift 14** (16 KB). /sbin/launchd has pageShift 12, which is why it loaded.
+    - bsd/kern/ubc_subr.c rejects `cd->pageSize != 12 && != PAGE_SHIFT` with "disallowing
+      unsupported code signature page shift", so with 4 KB VM pages the cache's signature is
+      refused. 4 KB pages can't work for iOS 16 userland.
+  - **Back to 16 KB VM over the 4 KB granule** (XNU's own > 1 GB choice, the A9 PAGE_RATIO 4
+    mode), and the build #12 commpage panic is fixed:
+    - pmap_create_commpages picks the commpage text VA as `random() % num_ptes` over the 512
+      hardware 4 KB leaf slots, but write_pte_fast writes 4 PTEs and needs a 16 KB-aligned VA.
+      That only lands one time in four, hence "PTE write is unaligned".
+    - Fix: `text_leaf_index &= ~(PAGE_RATIO - 1)`.
+    - arm_init: MIDO keeps 16 KB by default; boot-arg `mido_vm4k=1` forces 4 KB.
+    → build #17.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

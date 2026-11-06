@@ -526,6 +526,35 @@ NOT backed up: userdata (personal data — user to save it).
     - Fix: `text_leaf_index &= ~(PAGE_RATIO - 1)`.
     - arm_init: MIDO keeps 16 KB by default; boot-arg `mido_vm4k=1` forces 4 KB.
     → build #17.
+- **XNU boot #13 (build #17, run 42204141481, commit 288abcf), same iOS boot-args: iOS 16
+  USERLAND RUNS, up to SpringBoard. No panic.** (8 photos, about 2 minutes of boot.)
+  - launchd boot tasks ran: xpcroleaccountd, init_featureflags, auearlyboot ("No Early Boot
+    Accessories … End Early Boot"), tzinit ("Bad zoneinfo link" is harmless), FinishRestoreFromBackup,
+    finish_demo_restore, sysstatuscheck, prng_seedctl ("failed to load kernel prng seed", "failed
+    to load virtual random", both expected), launchd_cache_loader.
+  - launchd_cache_loader: "Using unsecure cache: /System/Library/xpc/launchd.plist … Cache sent to
+    launchd successfully". launchd UUID 5C15DB07-B3BC-3DF3-B62F-3E498B993B8E: **"Early boot
+    complete. Continuing system boot."**
+  - Daemons exec'd, roughly in order: SpringBoard, many xpcproxy, keybagd, usermanagerd ("SWEET AKS:
+    keybagd sel 0 … -> 0x0"), UserEventAgent, mediaserverd, backboardd, remoted, configd,
+    mobiletimerd, locationd, nfcd, timed, sleepd, driverkitd, mtmergeprops, containermanagerd,
+    fseventsd, thermalmonitord, sharingd, rapportd, logd, notifyd, ptpd, lockdownd, DumpPanic,
+    IOMFB_FDR_Loader, fairplayd.H2, distnoted, bluetoothd, imagent, identityservicesd, amfid,
+    AppleCredentialManagerDaemon, watchdogd, logd_helper, misd, remindd, cloudpaird, healthd,
+    accessoryupdaterd, seld, OTACrashCopier, wcd, routined, magicswitchd, atc, dasd,
+    peakpowermanagerd, runningboardd, bluetoothuserd, safetyalertsd, WirelessRadioManagerd,
+    ManagedSettingsAgent, powerd, amsaccountsd, assistantd, familynotificationd.
+  - ios-sweet's process sampler ("SMP --- sample 0") shows backboardd[56] (pc 0x1cd793180) and
+    SpringBoard[26] (pc 0x1f1cdfd08) with user backtraces in the shared cache (slide 0x4d6cc000).
+  - So all of these work: 16 KB VM over the 4 KB granule, the commpage fix, dyld and the shared
+    cache, the EL0 LSE emulator (every daemon uses libdispatch/pthread atomics), eMMC
+    read/write at 25 MHz 1-bit PIO, timers, GICv2 and cpus=1.
+  - The heartbeat still prints "MIDO tick N: bootstrap at bsd_init" (the stage is stale once
+    bsd_init turns into the init process). It's noise now and should be removed or limited.
+  - Open: is SpringBoard drawing? Kernel text is drawn over the framebuffer. ios-sweet uses
+    `sweetfb_noconsole=1` to show the GUI and keeps the console in the persistent log. Also,
+    SWEET FB "presented as 1125x2436" (iPhone X, patch 0061) doesn't match the iPhone10,5
+    identity (1242x2208 canvas, 1080x1920 panel).
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

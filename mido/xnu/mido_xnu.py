@@ -979,7 +979,30 @@ mido_card_ready(uint64_t ms)
 	return ETIMEDOUT;
 }
 
-/* nsec sectors at sector into / from the bounce buffer. */
+/*
+ * After a failed command: reset the CMD/DAT lines, stop an open multi-block
+ * transfer (auto-CMD12 may not have gone out after a data error) and wait
+ * for the card to return to the transfer state.
+ */
+static int
+mido_recover(void)
+{
+	mido_reset_lines();
+	if (mido_cmd(13, MIDO_RCA << 16, MR_R1, 0, 0, NULL) == 0) {
+		uint32_t st = (mido_resp >> 9) & 0xf;
+		if (st == 5 || st == 6) {                        /* data / rcv */
+			(void)mido_cmd(12, 0, MR_R1B, 0, 0, NULL);
+		}
+	}
+	return mido_card_ready(5000);
+}
+
+/*
+ * nsec sectors at sector into / from the bounce buffer. A failed chunk is
+ * retried after recovery (reads and writes of the same data are idempotent).
+ * Build #17: a CMD25 failed with SDHCI data timeout (sts 0x00108002) while the
+ * card was busy programming, which cost an HFS journal transaction.
+ */
 static int
 mido_xfer(uint64_t sector, uint32_t nsec, bool write)
 {
@@ -990,10 +1013,23 @@ mido_xfer(uint64_t sector, uint32_t nsec, bool write)
 	for (uint32_t done = 0; done < nsec;) {
 		uint32_t n = MIN(nsec - done, MIDO_CHUNK);
 		uint32_t idx = write ? (n > 1 ? 25 : 24) : (n > 1 ? 18 : 17);
-		int e = mido_cmd(idx, (uint32_t)(sector + done), MR_R1, write ? 1 : -1, n,
-		    buf + done * (MIDO_SECT / 4));
-		if (!e && write) {
-			e = mido_card_ready(2000);
+		int e = 0;
+		for (int attempt = 0; attempt < 4; attempt++) {
+			e = mido_cmd(idx, (uint32_t)(sector + done), MR_R1, write ? 1 : -1, n,
+			    buf + done * (MIDO_SECT / 4));
+			if (!e && write) {
+				e = mido_card_ready(5000);
+			}
+			if (!e) {
+				if (attempt) {
+					printf("MIDO EMMC: CMD%u at 0x%llx x%u ok on retry %d\n", idx,
+					    sector + done, n, attempt);
+				}
+				break;
+			}
+			int r = mido_recover();
+			printf("MIDO EMMC: CMD%u at 0x%llx x%u failed (%d), recover %d, retry %d\n",
+			    idx, sector + done, n, e, r, attempt + 1);
 		}
 		if (e) {
 			return e;
@@ -1038,6 +1074,9 @@ mido_sync_cache(void)
 static int
 mido_take_over(void)
 {
+	/* Data timeout counter (CLK reg [19:16]) to the maximum, 0xE = TMCLK x 2^27:
+	 * long write-busy (programming) phases must not abort CMD24/CMD25. */
+	mh_wr(M_CLK, (mh_rd(M_CLK) & ~(0xfu << 16)) | (0xeu << 16));
 	int e = mido_card_ready(500);
 	if (e) {
 		printf("MIDO EMMC: card not in transfer state after the shim (%d)\n", e);
@@ -1237,10 +1276,18 @@ edit('osfmk/kern/startup.c',
      'mido_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)\n'
      '{\n'
      '\tuint64_t deadline;\n'
-     '\tprintf("MIDO tick %u: bootstrap at %s\\n", ++mido_ticks, mido_boot_stage);\n'
-     '\tif (mido_ticks >= 3) {\n'
+     '\tstatic const char *last_stage;\n'
+     '\tconst char *stage = mido_boot_stage;\n'
+     '\tbool in_bsd = (strcmp(stage, "bsd_init") == 0);\n'
+     '\t++mido_ticks;\n'
+     '\t/* Quiet once the bootstrap thread has become init: one line a minute. */\n'
+     '\tif (stage != last_stage || (mido_ticks % 12) == 0) {\n'
+     '\t\tprintf("MIDO tick %u: bootstrap at %s\\n", mido_ticks, stage);\n'
+     '\t}\n'
+     '\tif (!in_bsd && stage == last_stage && mido_ticks >= 3) {\n'
      '\t\tmido_dump_thread(mido_boot_thread);\n'
      '\t}\n'
+     '\tlast_stage = stage;\n'
      '\tclock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);\n'
      '\tthread_call_enter_delayed(mido_tick_call, deadline);\n'
      '}\n'

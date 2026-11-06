@@ -1400,6 +1400,115 @@ edit('iokit/Kernel/arm/SweetCPU.cpp',
      '\tcpuName = OSSymbol::withCStringNoCopy("Kryo 470");\n'
      '#endif\n')
 
+# ---------------------------------------------------------------------------
+# SweetFramebuffer: present the iPhone 8 Plus canvas and downsample on the CPU.
+# Build #18's log: backboardd renders at the D211 canvas (surface 1242x2208),
+# SWEET FB presents the iPhone X panel (1125x2436, patch 0061), so backboardd
+# wants a hardware scaler: "IOServiceMatching failed for: AppleM2ScalerCSCDriver"
+# x9838 and no frame is ever presented. Under MIDO the display reports
+# 1242x2208 and AppleCLCD::present() maps each panel pixel (1080x1920) back to
+# its canvas pixel (nearest neighbour, 16.16 fixed point; 0.87x both axes, the
+# same ratio as the real 8 Plus downsampling).
+# ---------------------------------------------------------------------------
+FB = 'iokit/Kernel/arm/SweetFramebuffer.cpp'
+edit(FB,
+     '\tint32_t       fOffX, fOffY;             /* logical origin of the panel */\n',
+     '\tint32_t       fOffX, fOffY;             /* logical origin of the panel */\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tbool          fScaled;          /* logical canvas downsampled to the panel */\n'
+     '\tvoid          midoPresentScaled(SweetSurface *s, int32_t sx, int32_t sy,\n'
+     '\t    int32_t dx, int32_t dy, int32_t w, int32_t h);\n'
+     '#endif\n')
+edit(FB,
+     '\tfOffX = (int32_t)(fLogicalW - fWidth) / 2;\n'
+     '\tfOffY = (int32_t)(fLogicalH - fHeight) / 2;\n',
+     '\tfOffX = (int32_t)(fLogicalW - fWidth) / 2;\n'
+     '\tfOffY = (int32_t)(fLogicalH - fHeight) / 2;\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\t/* iPhone 8 Plus (D211) canvas, 414x736 points @3x */\n'
+     '\tfScaled = !native;\n'
+     '\tif (fScaled) {\n'
+     '\t\tfLogicalW = 1242;\n'
+     '\t\tfLogicalH = 2208;\n'
+     '\t\tfOffX = fOffY = 0;\n'
+     '\t}\n'
+     '#endif\n')
+edit(FB,
+     '\t\t/* Logical (presented) display coordinates -> panel coordinates. */\n'
+     '\t\tdx -= fOffX;\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\t\tif (fScaled) {\n'
+     '\t\t\tif (bpe == 4) {\n'
+     '\t\t\t\tmidoPresentScaled(s, sx, sy, dx, dy, w, h);\n'
+     '\t\t\t}\n'
+     '\t\t\ts->release();\n'
+     '\t\t\tcontinue;\n'
+     '\t\t}\n'
+     '#endif\n'
+     '\t\t/* Logical (presented) display coordinates -> panel coordinates. */\n'
+     '\t\tdx -= fOffX;\n')
+edit(FB,
+     'bool\nIOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)\n',
+     '#if defined(MIDO_BOARD)\n'
+     '/*\n'
+     ' * Copy canvas rect (sx,sy)+(w,h) shown at canvas (dx,dy) into the panel,\n'
+     ' * nearest neighbour: panel pixel p shows canvas pixel p * canvas / panel.\n'
+     ' */\n'
+     'void\n'
+     'AppleCLCD::midoPresentScaled(SweetSurface *s, int32_t sx, int32_t sy,\n'
+     '    int32_t dx, int32_t dy, int32_t w, int32_t h)\n'
+     '{\n'
+     '\tif (s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tif (w > (int32_t)s->width - sx) {\n'
+     '\t\tw = (int32_t)s->width - sx;\n'
+     '\t}\n'
+     '\tif (h > (int32_t)s->height - sy) {\n'
+     '\t\th = (int32_t)s->height - sy;\n'
+     '\t}\n'
+     '\tif (w > (int32_t)fLogicalW - dx) {\n'
+     '\t\tw = (int32_t)fLogicalW - dx;\n'
+     '\t}\n'
+     '\tif (h > (int32_t)fLogicalH - dy) {\n'
+     '\t\th = (int32_t)fLogicalH - dy;\n'
+     '\t}\n'
+     '\tif (w <= 0 || h <= 0) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tuint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +\n'
+     '\t    (uint64_t)(sx + w) * 4;\n'
+     '\tif (last > s->memory->getLength()) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tuintptr_t base = s->kernelAddress() + s->offset;\n'
+     '\tuint32_t stepx = (fLogicalW << 16) / fWidth, stepy = (fLogicalH << 16) / fHeight;\n'
+     '\t/* panel range whose canvas pixel falls inside [d, d + len) */\n'
+     '\tuint32_t px0 = (uint32_t)(((uint64_t)dx << 16) + stepx - 1) / stepx;\n'
+     '\tuint32_t px1 = (uint32_t)(((uint64_t)(dx + w) << 16) + stepx - 1) / stepx;\n'
+     '\tuint32_t py0 = (uint32_t)(((uint64_t)dy << 16) + stepy - 1) / stepy;\n'
+     '\tuint32_t py1 = (uint32_t)(((uint64_t)(dy + h) << 16) + stepy - 1) / stepy;\n'
+     '\tpx1 = MIN(px1, fWidth);\n'
+     '\tpy1 = MIN(py1, fHeight);\n'
+     '\tfor (uint32_t py = py0; py < py1; py++) {\n'
+     '\t\tint32_t ly = (int32_t)((py * stepy) >> 16) - dy;\n'
+     '\t\tif (ly < 0 || ly >= h) {\n'
+     '\t\t\tcontinue;\n'
+     '\t\t}\n'
+     '\t\tconst uint32_t *srow = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;\n'
+     '\t\tuint32_t *drow = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);\n'
+     '\t\tfor (uint32_t px = px0; px < px1; px++) {\n'
+     '\t\t\tint32_t lx = (int32_t)((px * stepx) >> 16) - dx;\n'
+     '\t\t\tif (lx >= 0 && lx < w) {\n'
+     '\t\t\t\tdrow[px] = srow[lx];\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t}\n'
+     '}\n'
+     '#endif\n'
+     '\n'
+     'bool\nIOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

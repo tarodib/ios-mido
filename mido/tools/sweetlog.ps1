@@ -2,8 +2,11 @@
 # from a phone in fastboot: boots the stock recovery (OrangeFox) into RAM only, reads with
 # adb exec-out dd (read-only), decodes with ios-sweet's tools/sweet-log.py.
 #   tools\sweetlog.ps1 [-Out xnu\sweetlog.txt] [-NoBoot]
-param([string]$Out = "C:\Users\user\ios-mido\xnu\sweetlog.txt", [switch]$NoBoot)
-$ErrorActionPreference = 'Stop'
+param([string]$Out = "C:\Users\user\ios-mido\xnu\sweetlog.txt",
+      [string]$Recovery = "C:\Users\user\ios-mido\recovery.img",   # OrangeFox (user-provided)
+      [switch]$NoBoot)
+# Not 'Stop': fastboot/adb print progress on stderr, which PowerShell 5.1 would treat as fatal.
+$ErrorActionPreference = 'Continue'
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 $root = 'C:\Users\user\ios-mido'
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
@@ -11,7 +14,7 @@ $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
 if (-not $NoBoot) {
     $fb = (fastboot devices) -join ''
     if (-not $fb) { throw 'phone not in fastboot' }
-    fastboot boot "$root\backup\stock\recovery.img" 2>&1 | ForEach-Object { "$_" }
+    fastboot boot $Recovery 2>&1 | ForEach-Object { "$_" }
 }
 $deadline = (Get-Date).AddSeconds(120)
 while ((Get-Date) -lt $deadline) {

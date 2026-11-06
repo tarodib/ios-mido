@@ -555,6 +555,40 @@ NOT backed up: userdata (personal data — user to save it).
     `sweetfb_noconsole=1` to show the GUI and keeps the console in the persistent log. Also,
     SWEET FB "presented as 1125x2436" (iPhone X, patch 0061) doesn't match the iPhone10,5
     identity (1242x2208 canvas, 1080x1920 panel).
+- **Later in the build #17 boot: eMMC write errors.**
+  - `MIDO EMMC: CMD25: transfer error (sts 0x00108002)`: error bits 0x0010 = SDHCI data timeout
+    while the card was busy programming (the data had all been sent).
+  - `jnl: … strategy err 0x5`, then `end_transaction: only wrote 20480 of 45056 bytes`.
+  - After that, a cascade: containermanagerd couldn't create the system containers, then
+    **backboardd** threw `NSInvalidArgumentException -[NSURL initFileURLWithPath:]: nil string`
+    and crash-looped ("Too many corpses"); lockdownd, lsd and driverkitd crashed too.
+  - Disassembly (tools/wsl-bbdis.sh, ipsw macho disass) of backboardd at 0x10001d858:
+    `BSPathProviderFactory pathProviderForSystemContainerForCurrentProcess` → `cachesPath` is nil.
+- Build #18 (d0ad1df; the first run had no runner, then 5e141d1, run 42209131940):
+  - eMMC: data timeout counter set to the maximum (CLK[19:16] = 0xE) in mido_take_over;
+    mido_recover() = reset lines, CMD13, CMD12 if in data/rcv state, wait for tran; each chunk is
+    retried up to 3 times.
+  - The heartbeat prints only on a stage change or once a minute.
+  - New boot-arg `mido_mute=1` mutes the drawn console from kernel_bootstrap_thread.
+    sweetfb_noconsole only mutes at the first GUI swap.
+- XNU boot #15 (build #18; root re-flashed clean; `sweetfb_noconsole=1 mido_mute=1`). The user
+  saw only early text for 10 minutes. Lines from -enable_kprintf_spam still draw after the mute,
+  so drop that boot-arg.
+  - **Persistent log pulled** with tools/sweetlog.ps1, using the user's OrangeFox
+    (ios-mido\recovery.img) booted into RAM: version 1, 762756 bytes, flush #46.
+  - **0 MIDO EMMC errors, no journal errors, no backboardd crash.** The only crash is driverkitd.
+    SpringBoard is alive (AKS calls).
+  - New blocker: backboardd opens AppleCLCD and creates surfaces **1242x2208** (the D211 canvas)
+    and 1125x2436 (the presented size), then loops `IOServiceMatching failed for:
+    AppleM2ScalerCSCDriver` (×9838). The presented size ≠ the canvas, so it wants the hardware
+    scaler, and no frame is ever presented.
+  - Fix (build #19), MIDO only in SweetFramebuffer.cpp:
+    - present **1242x2208**;
+    - `AppleCLCD::midoPresentScaled()` maps each panel pixel (1080x1920) to its canvas pixel
+      with 16.16 fixed-point nearest neighbour (0.87x, the real 8 Plus ratio), bounds-checked
+      like the crop path;
+    - `sweetfb_native=1` still presents the panel size.
+  - Not yet adjusted: SweetHIDTouch's panel→presented mapping (no mido touch driver yet).
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

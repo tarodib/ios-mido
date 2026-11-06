@@ -569,6 +569,119 @@ index 2545cf9..9099496 100644
  	const ml_topology_info_t *topology = ml_get_topology_info();
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..4567874 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -104,6 +104,11 @@ public:
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++#if defined(MIDO_BOARD)
++	bool          fScaled;          /* logical canvas downsampled to the panel */
++	void          midoPresentScaled(SweetSurface *s, int32_t sx, int32_t sy,
++	    int32_t dx, int32_t dy, int32_t w, int32_t h);
++#endif
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -176,6 +181,15 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++#if defined(MIDO_BOARD)
++	/* iPhone 8 Plus (D211) canvas, 414x736 points @3x */
++	fScaled = !native;
++	if (fScaled) {
++		fLogicalW = 1242;
++		fLogicalH = 2208;
++		fOffX = fOffY = 0;
++	}
++#endif
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -359,6 +373,15 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++#if defined(MIDO_BOARD)
++		if (fScaled) {
++			if (bpe == 4) {
++				midoPresentScaled(s, sx, sy, dx, dy, w, h);
++			}
++			s->release();
++			continue;
++		}
++#endif
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;
+@@ -401,6 +424,64 @@ AppleCLCD::present(const uint8_t *rec)
+ 	}
+ }
+ 
++#if defined(MIDO_BOARD)
++/*
++ * Copy canvas rect (sx,sy)+(w,h) shown at canvas (dx,dy) into the panel,
++ * nearest neighbour: panel pixel p shows canvas pixel p * canvas / panel.
++ */
++void
++AppleCLCD::midoPresentScaled(SweetSurface *s, int32_t sx, int32_t sy,
++    int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	if (s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {
++		return;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w > (int32_t)fLogicalW - dx) {
++		w = (int32_t)fLogicalW - dx;
++	}
++	if (h > (int32_t)fLogicalH - dy) {
++		h = (int32_t)fLogicalH - dy;
++	}
++	if (w <= 0 || h <= 0) {
++		return;
++	}
++	uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
++	    (uint64_t)(sx + w) * 4;
++	if (last > s->memory->getLength()) {
++		return;
++	}
++	uintptr_t base = s->kernelAddress() + s->offset;
++	uint32_t stepx = (fLogicalW << 16) / fWidth, stepy = (fLogicalH << 16) / fHeight;
++	/* panel range whose canvas pixel falls inside [d, d + len) */
++	uint32_t px0 = (uint32_t)(((uint64_t)dx << 16) + stepx - 1) / stepx;
++	uint32_t px1 = (uint32_t)(((uint64_t)(dx + w) << 16) + stepx - 1) / stepx;
++	uint32_t py0 = (uint32_t)(((uint64_t)dy << 16) + stepy - 1) / stepy;
++	uint32_t py1 = (uint32_t)(((uint64_t)(dy + h) << 16) + stepy - 1) / stepy;
++	px1 = MIN(px1, fWidth);
++	py1 = MIN(py1, fHeight);
++	for (uint32_t py = py0; py < py1; py++) {
++		int32_t ly = (int32_t)((py * stepy) >> 16) - dy;
++		if (ly < 0 || ly >= h) {
++			continue;
++		}
++		const uint32_t *srow = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
++		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		for (uint32_t px = px0; px < px1; px++) {
++			int32_t lx = (int32_t)((px * stepx) >> 16) - dx;
++			if (lx >= 0 && lx < w) {
++				drow[px] = srow[lx];
++			}
++		}
++	}
++}
++#endif
++
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+ {
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 92f3e26..1c8b494 100644
 --- a/iokit/KernelConfigTables.cpp

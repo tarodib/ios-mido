@@ -409,6 +409,17 @@ void shim_main(uint64_t dtb)
 	if (!fb) {   /* screen was cleared by the switch: redraw a header so the change is visible */
 		con_clear(C_NAVY);
 		con_puts("MIDO SHIM - 32BPP CONSOLE\n(EARLIER LINES ARE IN THE CACHE LOG)\n\n");
+		/*
+		 * Byte-order check: words 0xffRRGGBB, i.e. memory B,G,R,X = what iOS (BGRA)
+		 * writes. Expected top to bottom: RED, GREEN, BLUE. If top and bottom are
+		 * swapped, SRC_UNPACK_PATTERN has R and B reversed.
+		 */
+		static const uint32_t bar[3] = {0xffff0000U, 0xff00ff00U, 0xff0000ffU};
+		for (int i = 0; i < 3; i++)
+			for (uintptr_t y = 1180 + 180 * i; y < 1180 + 180 * i + 150; y++)
+				for (uintptr_t x = 100; x < 980; x++)
+					*(volatile uint32_t *)(0x90001000UL + y * 4320 + x * 4) = bar[i];
+		con_puts("COLOUR CHECK (BOTTOM OF SCREEN):\n TOP BAR SHOULD BE RED, MIDDLE GREEN, BOTTOM BLUE\n\n");
 	}
 	con_puts("FB 32BPP: "); con_puts(fb ? "SKIPPED\n" : "OK\n");
 	con_kv(" RGB0 FMT", rd32(MDP_RGB0 + 0x30));

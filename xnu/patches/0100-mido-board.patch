@@ -570,7 +570,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..4567874 100644
+index a62416c..b6d828d 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -104,6 +104,11 @@ public:
@@ -617,7 +617,7 @@ index a62416c..4567874 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +424,64 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +424,86 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -655,6 +655,23 @@ index a62416c..4567874 100644
 +	}
 +	uintptr_t base = s->kernelAddress() + s->offset;
 +	uint32_t stepx = (fLogicalW << 16) / fWidth, stepy = (fLogicalH << 16) / fHeight;
++	/*
++	 * backboardd renders the D211 (P3 wide colour) UI in kCVPixelFormatType_30RGBLE_8A
++	 * ('b3a8', 2 planes): plane 0 words are R[29:20] G[19:10] B[9:0], extended range
++	 * 384 = 0.0 .. 895 = 1.0; alpha is in plane 1 (ignored, the result is opaque).
++	 * Copied raw as BGRA, black came out navy and white pale yellow (run #22 lock screen).
++	 */
++	static uint8_t xr10[1024];
++	static bool xr10_ready;
++	bool wide = (s->pixelFormat == 0x62336138u);   /* 'b3a8' */
++	if (wide && !xr10_ready) {
++		for (int v = 0; v < 1024; v++) {
++			int c = ((v - 384) * 255 + 255) / 511;
++			xr10[v] = (uint8_t)(c < 0 ? 0 : c > 255 ? 255 : c);
++		}
++		xr10_ready = true;
++		IOLog("SWEET FB: converting b3a8 (30RGBLE_8A, XR 384..895) surfaces to BGRA\n");
++	}
 +	/* panel range whose canvas pixel falls inside [d, d + len) */
 +	uint32_t px0 = (uint32_t)(((uint64_t)dx << 16) + stepx - 1) / stepx;
 +	uint32_t px1 = (uint32_t)(((uint64_t)(dx + w) << 16) + stepx - 1) / stepx;
@@ -672,7 +689,12 @@ index a62416c..4567874 100644
 +		for (uint32_t px = px0; px < px1; px++) {
 +			int32_t lx = (int32_t)((px * stepx) >> 16) - dx;
 +			if (lx >= 0 && lx < w) {
-+				drow[px] = srow[lx];
++				uint32_t v = srow[lx];
++				if (wide) {
++					v = 0xff000000u | (uint32_t)xr10[(v >> 20) & 0x3ff] << 16 |
++					    (uint32_t)xr10[(v >> 10) & 0x3ff] << 8 | xr10[v & 0x3ff];
++				}
++				drow[px] = v;
 +			}
 +		}
 +	}

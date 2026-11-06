@@ -605,6 +605,20 @@ NOT backed up: userdata (personal data — user to save it).
     carrier text at the top left. **Milestone M4 (lock screen).** The clock shows **red**, so
     a possible R/B channel swap needs checking against a photo. Touch and buttons are not
     wired for mido yet.
+  - Lock screen photo: the layout and scale are right (status bar, "iPhone", charging battery
+    in green, date, 4:42, clock running). But the background is dark navy/purple, the clock is
+    peach with a red-orange glow, and the white text looks slightly yellow.
+  - Shim colour test (shim.c, shim-colortest.img, no XNU): bars written as 0xffRRGGBB (memory
+    B,G,R,X = iOS BGRA) show **red, green, blue** in that order, so the MDP RGB0 unpack
+    (0x03020001) is correct.
+  - Cause: backboardd's surfaces are `fmt 0x62336138` = **'b3a8' =
+    kCVPixelFormatType_30RGBLE_8A** (2 planes; plane 0 = R[29:20] G[19:10] B[9:0] in extended
+    range 384 = 0.0 .. 895 = 1.0, plane 1 = alpha). The D211 has a P3 panel, so backboardd uses
+    wide colour. Copied raw as BGRA: black (384,384,384) → R6 G1 B128 (navy), white (895×3) → R253
+    G255 B127 (pale yellow). This exactly matches the photo.
+  - Fix (run #24?): midoPresentScaled converts 'b3a8' pixels through a 1024-entry XR10 → 8-bit
+    table (clamped (v-384)*255/511) and logs "SWEET FB: converting b3a8 …" once. 8-bit surfaces
+    are still copied raw.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

@@ -469,7 +469,13 @@ void shim_main(uint64_t dtb)
 			flush_log();
 			delay_ms(8000);
 			con_clear(C_NAVY);
-			gpu_stage2(dtb);     /* stage 2: CP microcode + ring (needs the MIDOGPU1 ramdisk) */
+			if (gpu_stage2(dtb) == 0) {   /* stage 2: CP microcode + ring (MIDOGPU1 ramdisk) */
+				con_puts("\n(STAGE 3 ON A CLEAN SCREEN IN 8 S)\n");
+				flush_log();
+				delay_ms(8000);
+				con_clear(C_NAVY);
+				gpu_stage3();        /* stage 3: the GPU blits a gradient onto the screen */
+			}
 		}
 		flush_log();
 	}

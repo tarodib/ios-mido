@@ -59,7 +59,11 @@ def main():
         pm4 = open(os.path.join(fw, 'a530_pm4.fw'), 'rb').read()
         pfp = open(os.path.join(fw, 'a530_pfp.fw'), 'rb').read()
         rd = os.path.join(OUT, 'gpufw.bin')
-        open(rd, 'wb').write(b'MIDOGPU1' + struct.pack('<II', len(pm4), len(pfp)) + pm4 + pfp)
+        # zap shader: "ZAP1", mdt length, segment length, a506_zap.mdt, a506_zap.b02
+        mdt = open(os.path.join(fw, 'a506_zap.mdt'), 'rb').read()
+        seg = open(os.path.join(fw, 'a506_zap.b02'), 'rb').read()
+        zap = b'ZAP1' + struct.pack('<II', len(mdt), len(seg)) + mdt + seg
+        open(rd, 'wb').write(b'MIDOGPU1' + struct.pack('<II', len(pm4), len(pfp)) + pm4 + pfp + zap)
     if not rd:
         rd = os.path.join(OUT, 'empty.cpio.gz')   # LK dislikes a zero-size ramdisk
         trailer = b'070701' + b'0' * 8 * 11 + b'0000000B' + b'0' * 8 + b'TRAILER!!!\0'

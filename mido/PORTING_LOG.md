@@ -826,3 +826,28 @@ Next, in order:
   release and 2 ms after WPTR (and a log flush in between), passed.
 - Next: make the GPU draw something visible (2D blit/fill into the framebuffer at
   0x90001000), then move the bring-up into an XNU driver.
+
+### GPU stage 3: the Adreno 506 draws on the screen (2026-11-06, late evening)
+The GPU 2D engine copied a CPU-drawn 256x256 gradient onto the panel. Confirmed by the user
+on the phone. What it took after stage 2 (in order of discovery):
+1. UCHE init from a5xx_hw_init (cache ways, trap/write-through base, GMEM range), every
+   *_ADDR_MODE_CNTL = 1, Mesa fd5_emit_sysmem_prep state (render mode BYPASS, IB2 skip off,
+   CCU colour invalidate, PC/VFD power, **RB_CCU_CNTL = 0x10000000**), then fd5_blitter
+   emit_setup + per-row CP_BLIT (the 4320-byte framebuffer pitch is not a multiple of 64)
+   and PC_CCU_FLUSH_COLOR_TS + CACHE_FLUSH_TS. Not enough on its own: the blits executed
+   with no fault and wrote nothing, even into ordinary RAM.
+2. Cause: the GPU starts in **secure mode**; render traffic goes out on the secure stream.
+   CP_SET_SECURE_MODE 0 without a zap shader = CP opcode error (CPINT=1).
+3. **Zap shader** (pas-id 13, a506_zap.mdt + .b02) through TZ PIL, as msm subsys-pil-tz /
+   peripheral-loader do: metadata at the region start, INIT_IMAGE (SCM_ARGS(2,VAL,RW)),
+   MEM_SETUP (start, ALIGN(end,4K) - start = 0x2000), load .b02, AUTH_AND_RESET.
+   AUTH kept failing (-2 / -15) until the **secure SMMU page-table pool** was given to TZ
+   (msm_iommu_sec_pgtbl_init: MP svc PTBL_SIZE 3 -> 0x21000, PTBL_INIT 4 (paddr RW, size)).
+   Linux does this once at boot for any SMMU with qcom,tz-device-id. Reference: OrangeFox
+   with firmware_class.path=/tmp/fw loaded the same zap ("Brought out of reset", 0x8f800000).
+4. After the zap: ME_INIT, then **CP_SET_SECURE_MODE 0** before any memory write.
+   RBBM_SECVID_* (0xf4xx/0xf8xx) become secure-only: a read is an external abort.
+- Pools used by the shim test: secure PTBL 0x8c000000 (0x21000), zap 0x8f800000 (0x2000),
+  GPU ring/scratch/fw/IB/surfaces at 0xa0000000+.
+- Next: move power-up + zap + CP init into an XNU GPU driver, then an msm-style
+  BO/submit interface for Mesa freedreno in backboardd.

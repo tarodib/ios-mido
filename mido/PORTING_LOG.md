@@ -685,6 +685,19 @@ NOT backed up: userdata (personal data — user to save it).
     - per-row change detection / damage rects;
     - higher priority for the input thread;
     - then eMMC 8-bit/HS + DMA, CPU clock and SMP.
+  - **sweetfb_hz=1 test (same kernel): still extremely slow**, so the panel copy is not the main
+    load.
+  - SweetFramebuffer sends vsync notifications at a fixed 60 Hz (SWEET_FB_VSYNC_US 16667), and
+    backboardd renders on vsync in software, hence the >3000 swaps.
+  - The sampler only ever catches SpringBoard (102) and backboardd (97). The earlier log has
+    `logd_helper` "burning CPU": 90 s system vs 0.12 s user, i.e. kernel time, consistent with
+    LSE-emulation spin storms.
+  - Next build:
+    - `mido_vsync_hz` (default **15**) with the panel copy per vsync;
+    - `MIDO LSE:` per-minute report (total, delta, top-3 processes from an 8-slot decaying
+      table);
+    - eMMC deadline re-check (per-block 3 s, and status re-read after the deadline);
+    - input thread at kernel priority 81.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

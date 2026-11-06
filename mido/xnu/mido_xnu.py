@@ -884,7 +884,9 @@ mido_wait_sts(uint32_t mask, uint64_t ms)
 			return s;
 		}
 	} while (mach_absolute_time() < end);
-	return 0;
+	/* Preempted past the deadline (run #25: CPU-starved)? Look once more. */
+	uint32_t s = mh_rd(M_STS);
+	return (s & (mask | MS_ERR)) ? s : 0;
 }
 
 /* One command, nblk 512-byte sectors of PIO data through buf. dir: 0, -1 read, 1 write. */
@@ -924,7 +926,7 @@ mido_cmd(uint32_t idx, uint32_t arg, uint32_t rsp, int dir, uint32_t nblk, uint3
 
 	for (uint32_t b = 0; dir && b < nblk; b++) {
 		uint32_t ready = dir < 0 ? MP_RD_EN : MP_WR_EN;
-		uint64_t bend = mido_deadline(1000);
+		uint64_t bend = mido_deadline(3000);
 		for (;;) {
 			s = mh_rd(M_STS);
 			if (s & MS_ERR) {
@@ -934,7 +936,9 @@ mido_cmd(uint32_t idx, uint32_t arg, uint32_t rsp, int dir, uint32_t nblk, uint3
 				break;
 			}
 			if (mach_absolute_time() > bend) {
-				s = MS_ERR;
+				/* run #25: "data timeout (sts 0x00008000)" with no hardware error
+				 * bits = this deadline passing while preempted. Re-check first. */
+				s = (mh_rd(M_PRES) & ready) ? 0 : MS_ERR;
 				break;
 			}
 		}
@@ -1585,6 +1589,115 @@ edit(HID,
      '#else\n'
      '\tsetProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);\n'
      '#endif\n')
+
+# ---------------------------------------------------------------------------
+# Performance (run #25 boot: input events reach the kernel at once but iOS reacts
+# after minutes; sweetfb_hz=1 did not help). Without a GPU, backboardd software-
+# renders on every vsync notification, which SWEET FB sends at a fixed 60 Hz:
+# >3000 swaps. MIDO default 15 Hz (boot-arg mido_vsync_hz), panel copy per vsync.
+# ---------------------------------------------------------------------------
+edit(FB,
+     '#define SWEET_FB_VSYNC_US               16667\n',
+     '#if defined(MIDO_BOARD)\n'
+     'static uint32_t mido_vsync_us = 66667;          /* 15 Hz, boot-arg mido_vsync_hz */\n'
+     '#define SWEET_FB_VSYNC_US               mido_vsync_us\n'
+     '#else\n'
+     '#define SWEET_FB_VSYNC_US               16667\n'
+     '#endif\n')
+edit(FB,
+     '\tuint32_t hz = 10;\n'
+     '\tPE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));\n'
+     '\tfFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\tuint32_t vhz = 15, hz = 15;\n'
+     '\tPE_parse_boot_argn("mido_vsync_hz", &vhz, sizeof(vhz));\n'
+     '\tif (vhz == 0 || vhz > 60) {\n'
+     '\t\tvhz = 15;\n'
+     '\t}\n'
+     '\tmido_vsync_us = 1000000u / vhz;\n'
+     '\tPE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));\n'
+     '\tfFlushTicks = (hz == 0 || hz >= vhz) ? 1 : vhz / hz;\n'
+     '\tIOLog("SWEET FB: MIDO vsync %u Hz, panel copy every %u vsync\\n", vhz, fFlushTicks);\n'
+     '#else\n'
+     '\tuint32_t hz = 10;\n'
+     '\tPE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));\n'
+     '\tfFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;\n'
+     '#endif\n')
+
+# LSE emulation statistics: per-process counts (8-slot table, reset each report),
+# printed once a minute by the heartbeat. logd_helper once burned 90 s of system time
+# (0.1 s user) - an LSE spin storm would look exactly like that.
+edit('osfmk/arm64/sleh.c',
+     'static uint64_t mido_lse_count;\n',
+     'static uint64_t mido_lse_count;\n'
+     'static struct { int pid; uint32_t n; char name[17]; } mido_lse_top[8];\n'
+     'extern char *proc_name_address(void *p);\n'
+     '\n'
+     'static void\n'
+     'mido_lse_account(void)\n'
+     '{\n'
+     '\tint pid = task_pid(current_task());\n'
+     '\tunsigned slot = 0, min = 0;\n'
+     '\tfor (slot = 0; slot < 8; slot++) {\n'
+     '\t\tif (mido_lse_top[slot].pid == pid && mido_lse_top[slot].n) {\n'
+     '\t\t\tmido_lse_top[slot].n++;\n'
+     '\t\t\treturn;\n'
+     '\t\t}\n'
+     '\t\tif (mido_lse_top[slot].n < mido_lse_top[min].n) {\n'
+     '\t\t\tmin = slot;\n'
+     '\t\t}\n'
+     '\t}\n'
+     '\tif (mido_lse_top[min].n > 1) {\n'
+     '\t\tmido_lse_top[min].n--;                   /* decay: keep the hot ones */\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tvoid *p = get_bsdtask_info(current_task());\n'
+     '\tconst char *nm = p ? proc_name_address(p) : "?";\n'
+     '\tmido_lse_top[min].pid = pid;\n'
+     '\tmido_lse_top[min].n = 1;\n'
+     '\tstrlcpy(mido_lse_top[min].name, nm ? nm : "?", sizeof(mido_lse_top[min].name));\n'
+     '}\n'
+     '\n'
+     '/* Called once a minute from the startup.c heartbeat. */\n'
+     'void mido_lse_report(void);\n'
+     'void\n'
+     'mido_lse_report(void)\n'
+     '{\n'
+     '\tstatic uint64_t last;\n'
+     '\tuint64_t now = mido_lse_count;\n'
+     '\tprintf("MIDO LSE: %llu emulated (+%llu in the last minute)", now, now - last);\n'
+     '\tfor (int r = 0; r < 3; r++) {\n'
+     '\t\tint best = -1;\n'
+     '\t\tfor (int i = 0; i < 8; i++) {\n'
+     '\t\t\tif (mido_lse_top[i].n && (best < 0 || mido_lse_top[i].n > mido_lse_top[best].n)) {\n'
+     '\t\t\t\tbest = i;\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t\tif (best < 0) {\n'
+     '\t\t\tbreak;\n'
+     '\t\t}\n'
+     '\t\tprintf(" %s[%d]:%u", mido_lse_top[best].name, mido_lse_top[best].pid, mido_lse_top[best].n);\n'
+     '\t\tmido_lse_top[best].n = 0;\n'
+     '\t}\n'
+     '\tprintf("\\n");\n'
+     '\tbzero(mido_lse_top, sizeof(mido_lse_top));\n'
+     '\tlast = now;\n'
+     '}\n')
+edit('osfmk/arm64/sleh.c',
+     '\t\t\tif (mido_lse_count++ == 0) {\n',
+     '\t\t\tmido_lse_account();\n'
+     '\t\t\tif (mido_lse_count++ == 0) {\n')
+edit('osfmk/kern/startup.c',
+     '\tif (stage != last_stage || (mido_ticks % 12) == 0) {\n'
+     '\t\tprintf("MIDO tick %u: bootstrap at %s\\n", mido_ticks, stage);\n'
+     '\t}\n',
+     '\tif (stage != last_stage || (mido_ticks % 12) == 0) {\n'
+     '\t\tprintf("MIDO tick %u: bootstrap at %s\\n", mido_ticks, stage);\n'
+     '\t}\n'
+     '\tif ((mido_ticks % 12) == 0) {\n'
+     '\t\textern void mido_lse_report(void);\n'
+     '\t\tmido_lse_report();\n'
+     '\t}\n')
 
 if failures:
     print('MIDO EDIT FAILURES:')

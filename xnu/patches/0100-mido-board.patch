@@ -12,10 +12,10 @@ index 6630131..d4baef2 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_input.c b/bsd/dev/mido_input.c
 new file mode 100644
-index 0000000..c060ec7
+index 0000000..1f73714
 --- /dev/null
 +++ b/bsd/dev/mido_input.c
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,313 @@
 +/*
 + * MIDO (Redmi Note 4, MSM8953) input: FT5435 touch, power / volume keys.
 + *
@@ -323,16 +323,17 @@ index 0000000..c060ec7
 +	int e = ft_read(0xa3, id, 1);
 +	printf("MIDO INPUT: FT5435 id 0x%02x (err %d), PON chan %d, vol+ gpio85=%u\n",
 +	    id[0], e, pon_chan, rd(gpio85, 4) & 1u);
-+	if (kernel_thread_start(input_thread, NULL, &thread) == KERN_SUCCESS) {
++	/* Above user threads: a starved poller would add its own delay to every touch. */
++	if (kernel_thread_start_priority(input_thread, NULL, 81, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	}
 +}
 +#endif /* MIDO_BOARD */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..1fc3e97 100644
+index 6b926fe..9945fb0 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -117,6 +117,344 @@ static struct {
+@@ -117,6 +117,348 @@ static struct {
  static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
  static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
  
@@ -409,7 +410,9 @@ index 6b926fe..1fc3e97 100644
 +			return s;
 +		}
 +	} while (mach_absolute_time() < end);
-+	return 0;
++	/* Preempted past the deadline (run #25: CPU-starved)? Look once more. */
++	uint32_t s = mh_rd(M_STS);
++	return (s & (mask | MS_ERR)) ? s : 0;
 +}
 +
 +/* One command, nblk 512-byte sectors of PIO data through buf. dir: 0, -1 read, 1 write. */
@@ -449,7 +452,7 @@ index 6b926fe..1fc3e97 100644
 +
 +	for (uint32_t b = 0; dir && b < nblk; b++) {
 +		uint32_t ready = dir < 0 ? MP_RD_EN : MP_WR_EN;
-+		uint64_t bend = mido_deadline(1000);
++		uint64_t bend = mido_deadline(3000);
 +		for (;;) {
 +			s = mh_rd(M_STS);
 +			if (s & MS_ERR) {
@@ -459,7 +462,9 @@ index 6b926fe..1fc3e97 100644
 +				break;
 +			}
 +			if (mach_absolute_time() > bend) {
-+				s = MS_ERR;
++				/* run #25: "data timeout (sts 0x00008000)" with no hardware error
++				 * bits = this deadline passing while preempted. Re-check first. */
++				s = (mh_rd(M_PRES) & ready) ? 0 : MS_ERR;
 +				break;
 +			}
 +		}
@@ -677,7 +682,7 @@ index 6b926fe..1fc3e97 100644
  static inline uint32_t
  ufs_rd(uint32_t off)
  {
-@@ -129,13 +467,13 @@ ufs_wr(uint32_t off, uint32_t v)
+@@ -129,13 +471,13 @@ ufs_wr(uint32_t off, uint32_t v)
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -693,7 +698,7 @@ index 6b926fe..1fc3e97 100644
  dma_clean(uint32_t off, uint32_t len)
  {
  	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -145,7 +483,7 @@ dma_clean(uint32_t off, uint32_t len)
+@@ -145,7 +487,7 @@ dma_clean(uint32_t off, uint32_t len)
   * One SCSI command in slot 0, data (if any) to/from the bounce buffer
   * (to the device when write is set). Returns 0 or an errno.
   */
@@ -702,7 +707,7 @@ index 6b926fe..1fc3e97 100644
  ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  {
  	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
-@@ -260,6 +598,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -260,6 +602,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  static int
  ufs_read_blocks(uint64_t lba, uint32_t count)
  {
@@ -712,7 +717,7 @@ index 6b926fe..1fc3e97 100644
  	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
  		return EINVAL;
  	}
-@@ -269,6 +610,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
+@@ -269,6 +614,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
  		0, (uint8_t)(count >> 8), (uint8_t)count, 0
  	};
  	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
@@ -720,7 +725,7 @@ index 6b926fe..1fc3e97 100644
  }
  
  /*
-@@ -284,24 +626,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+@@ -284,24 +630,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
  		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
  		return EPERM;
  	}
@@ -756,7 +761,7 @@ index 6b926fe..1fc3e97 100644
  	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
  	int error = ufs_read_blocks(1, 1);
  	if (error) {
-@@ -351,11 +704,15 @@ ufs_find_partition(const char *want)
+@@ -351,11 +708,15 @@ ufs_find_partition(const char *want)
  	}
  	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
  	return ENOENT;
@@ -772,7 +777,7 @@ index 6b926fe..1fc3e97 100644
  	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
  	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
-@@ -385,6 +742,7 @@ ufs_take_over_host(void)
+@@ -385,6 +746,7 @@ ufs_take_over_host(void)
  		return EIO;
  	}
  	return 0;
@@ -780,7 +785,7 @@ index 6b926fe..1fc3e97 100644
  }
  
  static int
-@@ -592,9 +950,16 @@ sweet_ufs_init(void)
+@@ -592,9 +954,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -797,7 +802,7 @@ index 6b926fe..1fc3e97 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -607,7 +972,11 @@ sweet_ufs_init(void)
+@@ -607,7 +976,11 @@ sweet_ufs_init(void)
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
  
@@ -809,7 +814,7 @@ index 6b926fe..1fc3e97 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +992,14 @@ sweet_ufs_init(void)
+@@ -623,12 +996,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -824,7 +829,7 @@ index 6b926fe..1fc3e97 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -657,9 +1028,16 @@ sweet_ufs_init(void)
+@@ -657,9 +1032,16 @@ sweet_ufs_init(void)
  	sweet_log_start();
  	sweet_sample_start();
  	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
@@ -905,10 +910,23 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..b6d828d 100644
+index a62416c..9c89b65 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -104,6 +104,11 @@ public:
+@@ -68,7 +68,12 @@ enum {
+ #define SWEET_FB_LAYERS                 4
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
++#if defined(MIDO_BOARD)
++static uint32_t mido_vsync_us = 66667;          /* 15 Hz, boot-arg mido_vsync_hz */
++#define SWEET_FB_VSYNC_US               mido_vsync_us
++#else
+ #define SWEET_FB_VSYNC_US               16667
++#endif
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
+  * The iOS userland only has status bar / layout data for real iPhone
+@@ -104,6 +109,11 @@ public:
  	uint32_t      fWidth, fHeight, fRowBytes;
  	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
  	int32_t       fOffX, fOffY;             /* logical origin of the panel */
@@ -920,7 +938,7 @@ index a62416c..b6d828d 100644
  	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
  	IOMemoryMap  *fMap;
  	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
-@@ -176,6 +181,15 @@ AppleCLCD::start(IOService *provider)
+@@ -176,6 +186,15 @@ AppleCLCD::start(IOService *provider)
  	}
  	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
  	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
@@ -936,7 +954,29 @@ index a62416c..b6d828d 100644
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
-@@ -359,6 +373,15 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -192,9 +211,21 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
++#if defined(MIDO_BOARD)
++	uint32_t vhz = 15, hz = 15;
++	PE_parse_boot_argn("mido_vsync_hz", &vhz, sizeof(vhz));
++	if (vhz == 0 || vhz > 60) {
++		vhz = 15;
++	}
++	mido_vsync_us = 1000000u / vhz;
++	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
++	fFlushTicks = (hz == 0 || hz >= vhz) ? 1 : vhz / hz;
++	IOLog("SWEET FB: MIDO vsync %u Hz, panel copy every %u vsync\n", vhz, fFlushTicks);
++#else
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++#endif
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -359,6 +390,15 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -952,7 +992,7 @@ index a62416c..b6d828d 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +424,86 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +441,86 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -1288,15 +1328,68 @@ index 06bb568..00f2ed2 100644
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index 24f1abc..7129ec9 100644
+index 24f1abc..07d712d 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -879,6 +879,156 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+@@ -879,6 +879,210 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
   * Uncategorized exceptions are a catch-all for general execution errors.
   * ARM64_TODO: For now, we assume this is for undefined instruction exceptions.
   */
 +#if defined(MIDO_CPU_ARMV8_0)
 +static uint64_t mido_lse_count;
++static struct { int pid; uint32_t n; char name[17]; } mido_lse_top[8];
++extern char *proc_name_address(void *p);
++
++static void
++mido_lse_account(void)
++{
++	int pid = task_pid(current_task());
++	unsigned slot = 0, min = 0;
++	for (slot = 0; slot < 8; slot++) {
++		if (mido_lse_top[slot].pid == pid && mido_lse_top[slot].n) {
++			mido_lse_top[slot].n++;
++			return;
++		}
++		if (mido_lse_top[slot].n < mido_lse_top[min].n) {
++			min = slot;
++		}
++	}
++	if (mido_lse_top[min].n > 1) {
++		mido_lse_top[min].n--;                   /* decay: keep the hot ones */
++		return;
++	}
++	void *p = get_bsdtask_info(current_task());
++	const char *nm = p ? proc_name_address(p) : "?";
++	mido_lse_top[min].pid = pid;
++	mido_lse_top[min].n = 1;
++	strlcpy(mido_lse_top[min].name, nm ? nm : "?", sizeof(mido_lse_top[min].name));
++}
++
++/* Called once a minute from the startup.c heartbeat. */
++void mido_lse_report(void);
++void
++mido_lse_report(void)
++{
++	static uint64_t last;
++	uint64_t now = mido_lse_count;
++	printf("MIDO LSE: %llu emulated (+%llu in the last minute)", now, now - last);
++	for (int r = 0; r < 3; r++) {
++		int best = -1;
++		for (int i = 0; i < 8; i++) {
++			if (mido_lse_top[i].n && (best < 0 || mido_lse_top[i].n > mido_lse_top[best].n)) {
++				best = i;
++			}
++		}
++		if (best < 0) {
++			break;
++		}
++		printf(" %s[%d]:%u", mido_lse_top[best].name, mido_lse_top[best].pid, mido_lse_top[best].n);
++		mido_lse_top[best].n = 0;
++	}
++	printf("\n");
++	bzero(mido_lse_top, sizeof(mido_lse_top));
++	last = now;
++}
 +
 +static inline uint64_t
 +mido_ureg(arm_saved_state_t *s, unsigned r)
@@ -1426,6 +1519,7 @@ index 24f1abc..7129ec9 100644
 +			__builtin_arm_dmb(0xb);
 +			add_saved_state_pc(state, 4);
 +			ml_set_interrupts_enabled(istate);
++			mido_lse_account();
 +			if (mido_lse_count++ == 0) {
 +				printf("MIDO LSE: emulating ARMv8.1 atomics for EL0 (first: %08x)\n", insn);
 +			}
@@ -1448,7 +1542,7 @@ index 24f1abc..7129ec9 100644
  static void
  handle_uncategorized(arm_saved_state_t *state)
  {
-@@ -889,6 +1039,12 @@ handle_uncategorized(arm_saved_state_t *state)
+@@ -889,6 +1093,12 @@ handle_uncategorized(arm_saved_state_t *state)
  
  	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
  
@@ -1461,7 +1555,7 @@ index 24f1abc..7129ec9 100644
  #if CONFIG_DTRACE
  
  	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
-@@ -1861,8 +2017,16 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1861,8 +2071,16 @@ sleh_irq(arm_saved_state_t *state)
  	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
  	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
  	 */
@@ -1478,7 +1572,7 @@ index 24f1abc..7129ec9 100644
  
  	if (intid >= 1020 && intid <= 1023) {
  		return; /* spurious */
-@@ -1873,11 +2037,11 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1873,11 +2091,11 @@ sleh_irq(arm_saved_state_t *state)
  		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
  		rtclock_intr(TRUE);
  		INTERRUPT_MASKED_DEBUG_END();
@@ -1492,7 +1586,7 @@ index 24f1abc..7129ec9 100644
  		__builtin_arm_isb(ISB_SY);
  		cpu_signal_handler();
  	} else {
-@@ -1888,7 +2052,7 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1888,7 +2106,7 @@ sleh_irq(arm_saved_state_t *state)
  			    cdp->interrupt_nub,
  			    intid);
  		}
@@ -1659,10 +1753,10 @@ index 6928957..53b7988 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
-index bec97fb..9a6bc33 100644
+index bec97fb..f1a2cfd 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -218,9 +218,67 @@ extern int serverperfmode;
+@@ -218,9 +218,71 @@ extern int serverperfmode;
  
  TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
  
@@ -1709,6 +1803,10 @@ index bec97fb..9a6bc33 100644
 +	if (stage != last_stage || (mido_ticks % 12) == 0) {
 +		printf("MIDO tick %u: bootstrap at %s\n", mido_ticks, stage);
 +	}
++	if ((mido_ticks % 12) == 0) {
++		extern void mido_lse_report(void);
++		mido_lse_report();
++	}
 +	if (!in_bsd && stage == last_stage && mido_ticks >= 3) {
 +		mido_dump_thread(mido_boot_thread);
 +	}
@@ -1730,7 +1828,7 @@ index bec97fb..9a6bc33 100644
  	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
  	    startup_phase >= STARTUP_SUB_KPRINTF) {
  		kprintf("kernel_bootstrap: %s\n", message);
-@@ -231,6 +289,10 @@ kernel_bootstrap_log(const char *message)
+@@ -231,6 +293,10 @@ kernel_bootstrap_log(const char *message)
  static inline void
  kernel_bootstrap_thread_log(const char *message)
  {
@@ -1741,7 +1839,7 @@ index bec97fb..9a6bc33 100644
  	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
  	    startup_phase >= STARTUP_SUB_KPRINTF) {
  		kprintf("kernel_bootstrap_thread: %s\n", message);
-@@ -623,6 +685,23 @@ kernel_bootstrap_thread(void)
+@@ -623,6 +689,23 @@ kernel_bootstrap_thread(void)
  	 * Thread callout service.
  	 */
  	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
@@ -1765,7 +1863,7 @@ index bec97fb..9a6bc33 100644
  
  	/*
  	 * Remain on current processor as
-@@ -771,6 +850,9 @@ kernel_bootstrap_thread(void)
+@@ -771,6 +854,9 @@ kernel_bootstrap_thread(void)
  #ifdef  IOKIT
  	kernel_bootstrap_log("PE_lockdown_iokit");
  	PE_lockdown_iokit();
@@ -1775,7 +1873,7 @@ index bec97fb..9a6bc33 100644
  #endif
  	/*
  	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
-@@ -786,6 +868,9 @@ kernel_bootstrap_thread(void)
+@@ -786,6 +872,9 @@ kernel_bootstrap_thread(void)
  	/*
  	 *	Start the user bootstrap.
  	 */

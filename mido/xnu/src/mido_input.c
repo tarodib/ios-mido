@@ -305,7 +305,8 @@ mido_input_init(void)
 	int e = ft_read(0xa3, id, 1);
 	printf("MIDO INPUT: FT5435 id 0x%02x (err %d), PON chan %d, vol+ gpio85=%u\n",
 	    id[0], e, pon_chan, rd(gpio85, 4) & 1u);
-	if (kernel_thread_start(input_thread, NULL, &thread) == KERN_SUCCESS) {
+	/* Above user threads: a starved poller would add its own delay to every touch. */
+	if (kernel_thread_start_priority(input_thread, NULL, 81, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }

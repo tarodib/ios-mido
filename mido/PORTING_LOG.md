@@ -589,6 +589,15 @@ NOT backed up: userdata (personal data — user to save it).
       like the crop path;
     - `sweetfb_native=1` still presents the panel size.
   - Not yet adjusted: SweetHIDTouch's panel→presented mapping (no mido touch driver yet).
+- **XNU boot #16 (GitHub run #22, run id 42215454774, commit f212e27): THE APPLE LOGO IS ON
+  THE SCREEN** (user report).
+  - Setup: clean root re-flashed (506.8 s, 24/24 OK). Boot-args = the iOS set,
+    `sweetfb_noconsole=1 mido_mute=1`, without -enable_kprintf_spam. The console stopped at
+    "MIDO: console muted (mido_mute=1)".
+  - The Apple logo appeared **about 8 minutes** after boot. So backboardd presents frames through
+    AppleCLCD and the 1242x2208 → 1080x1920 CPU downsampling works. **Milestone M3 (Apple logo).**
+  - Numbering note: from here on, builds are referred to by GitHub run number (#22 = what this
+    log called build #19; earlier failed/unacquired runs and reruns also count).
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

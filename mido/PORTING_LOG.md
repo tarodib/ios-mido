@@ -660,6 +660,31 @@ NOT backed up: userdata (personal data — user to save it).
       disables it.
   - SweetHID (MIDO): touches are normalised against the 1080x1920 panel (= the whole downsampled
     canvas), y clamped at 1919, SurfaceHeight 121 mm.
+- Commit 826be09 was built as run #24, but the job was "not acquired" twice (arm64 macOS runner
+  capacity). **Run #25 = the same commit on `runner=macos-15-intel`**: picked up at once, built
+  in 15 min, and the kernel is identical in content (kscan clean; MIDO INPUT, b3a8, scaling, mute
+  and LSE strings all present). Intel is the fallback runner from now on.
+- **XNU boot #17 (run #25)** on the root from the previous boot. User: lock screen, touch and
+  buttons work **but react after minutes**; the clock is still red. Persistent log (230157 bytes,
+  flush #87):
+  - `MIDO INPUT: FT5435 id 0x54 (err 0), PON chan 44, vol+ gpio85=1`; **82 input events logged
+    promptly**: touches, home key, power (0), vol+ (1), vol- (2). So the kernel driver is
+    fine and the latency is downstream.
+  - Frames this boot are **'BGRA' (0x42475241)** 1242x2208 (not b3a8), so the red clock is
+    iOS's own GPU-less rendering of the clock effect, not a colour bug.
+  - `display off` / `display on`: auto-lock. Only crash: driverkitd. `SWEET FB: 1000/2000/3000
+    swaps`.
+  - 15 `MIDO EMMC: CMD18 … data timeout (sts 0x00008000)` → `ok on retry 1`. The hardware error
+    bits are 0: this is the software 1 s deadline expiring while the thread was preempted.
+    **Fix: re-check readiness after the deadline; longer deadlines.**
+  - Diagnosis: the single A53 core is saturated by AppleCLCD::present(): a full 1080x1920
+    gather/downscale per flush at sweetfb_hz=10 (default) from the vsync timer, with thousands
+    of swaps. Test: the same kernel with `sweetfb_hz=1` (shim-boot-run25-hz1.img).
+    Planned fixes:
+    - present only new frames;
+    - per-row change detection / damage rects;
+    - higher priority for the input thread;
+    - then eMMC 8-bit/HS + DMA, CPU clock and SMP.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

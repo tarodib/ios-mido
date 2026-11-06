@@ -528,6 +528,75 @@ edit('osfmk/kern/zalloc.c',
      '#if XNU_PLATFORM_MacOSX && !defined(MIDO_4K_VM)\n'
      '#define ZONE_MAP_MAX            (32ULL << 30)\n')
 
+# vm_kern: build #8 (24 GB zones) still panicked "vm_map_locate_space failing for
+# claim zones". On failure, dump the kernel map, every claim and every big hole to the
+# console, then retry once from the bottom of the map before panicking.
+edit('osfmk/vm/vm_kern.c',
+     '__startup_func\n'
+     'static void\n'
+     'kmem_scramble_ranges(void)\n'
+     '{\n',
+     '#if defined(MIDO_4K_VM)\n'
+     '__startup_func\n'
+     'static void\n'
+     'mido_kmem_claims_dump(uint32_t fail_idx, vm_map_offset_t cursor)\n'
+     '{\n'
+     '\tvm_map_size_t lf = 0;\n'
+     '\tvm_map_entry_t e;\n'
+     '\tvm_map_offset_t prev;\n'
+     '\n'
+     '\tvm_map_sizes(kernel_map, NULL, NULL, &lf);\n'
+     '\tprintf("MIDO kmap %llx-%llx cur %llx lfree %lluM\\n",\n'
+     '\t    (uint64_t)kernel_map->min_offset, (uint64_t)kernel_map->max_offset,\n'
+     '\t    (uint64_t)cursor, (uint64_t)(lf >> 20));\n'
+     '\tfor (uint32_t k = 0; k < kmem_claim_count; k++) {\n'
+     '\t\tprintf("%c%s %lluM%s", k == fail_idx ? \'*\' : \' \',\n'
+     '\t\t    kmem_claims[k].kc_name,\n'
+     '\t\t    (unsigned long long)(kmem_claims[k].kc_size >> 20),\n'
+     '\t\t    (k & 1) ? "\\n" : " |");\n'
+     '\t}\n'
+     '\tprintf("\\n");\n'
+     '\tprev = kernel_map->min_offset;\n'
+     '\tfor (e = vm_map_first_entry(kernel_map); e != vm_map_to_entry(kernel_map);\n'
+     '\t    e = e->vme_next) {\n'
+     '\t\tif (e->vme_start - prev >= (16ULL << 20)) {\n'
+     '\t\t\tprintf("hole %llx-%llx %lluM\\n", (uint64_t)prev,\n'
+     '\t\t\t    (uint64_t)e->vme_start, (uint64_t)((e->vme_start - prev) >> 20));\n'
+     '\t\t}\n'
+     '\t\tprev = e->vme_end;\n'
+     '\t}\n'
+     '\tif (kernel_map->max_offset - prev >= (16ULL << 20)) {\n'
+     '\t\tprintf("hole %llx-%llx (tail)\\n", (uint64_t)prev,\n'
+     '\t\t    (uint64_t)kernel_map->max_offset);\n'
+     '\t}\n'
+     '}\n'
+     '#endif\n'
+     '\n'
+     '__startup_func\n'
+     'static void\n'
+     'kmem_scramble_ranges(void)\n'
+     '{\n')
+edit('osfmk/vm/vm_kern.c',
+     '\t\tif (vm_map_locate_space(kernel_map, sp.kc_size, 0,\n'
+     '\t\t    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {\n'
+     '\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s",\n'
+     '\t\t\t    sp.kc_name);\n'
+     '\t\t}\n',
+     '\t\tif (vm_map_locate_space(kernel_map, sp.kc_size, 0,\n'
+     '\t\t    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {\n'
+     '#if defined(MIDO_4K_VM)\n'
+     '\t\t\tmido_kmem_claims_dump(i, start);\n'
+     '\t\t\tstart = kernel_map->min_offset;\n'
+     '\t\t\tif (vm_map_locate_space(kernel_map, sp.kc_size, 0,\n'
+     '\t\t\t    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) == KERN_SUCCESS) {\n'
+     '\t\t\t\tprintf("MIDO: claim %s placed on retry at %llx\\n",\n'
+     '\t\t\t\t    sp.kc_name, (uint64_t)start);\n'
+     '\t\t\t} else\n'
+     '#endif\n'
+     '\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s",\n'
+     '\t\t\t    sp.kc_name);\n'
+     '\t\t}\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

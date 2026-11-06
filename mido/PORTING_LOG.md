@@ -311,6 +311,19 @@ NOT backed up: userdata (personal data — user to save it).
   - Fix (mido_xnu.py): under MIDO_4K_VM use the iOS sizes (ZONE_MAP_VA_SIZE 24 GB, ZONE_MAP_MAX 8 GB).
     This also cuts zone metadata VA from 512 MB to 96 MB at 4K pages. The other claims (ptr, data,
     sprayqtn) are sized from the remaining free space. → build #8.
+- XNU boot #4 (build #8, run 42182690814, commit 5e4392e): kscan clean (only the K256 data match).
+  Shim jumped. Result: **same panic** (`claim zones @vm_kern.c:3645`), so the 128 GB size wasn't
+  the only problem.
+  - Kernel map layout (4K, no KTRR, no large memory): it is created over VM_MIN_KERNEL_ADDRESS
+    0xffffffe000000000 .. VM_MAX 0xfffffffbffffffff. Reserved inside it: pmap_virtual_region 0
+    (gVirtBase..virtual_space_start), VREGION1 (top), low globals. That leaves a ~64 GB hole
+    below 0xfffffff000000000 and a ~46 GB hole above the kernel. kmem_add_extra_claims sizes
+    the ptr/sprayqtn/data claims so that all claims fill the largest hole exactly. The
+    compressor, bsd and ipc claims are small (scaled to 1.5 GB of RAM), so no obvious overflow.
+  - Can't settle it from the source, so build #9 adds `mido_kmem_claims_dump()`. On failure it
+    prints the map bounds, the cursor, the largest free hole, every claim and size (the failing
+    one marked with *), and every hole ≥ 16 MB. It then retries the claim from the bottom of the
+    map before panicking.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

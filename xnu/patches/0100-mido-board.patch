@@ -406,6 +406,69 @@ index c013288..fd892f9 100644
  #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
  #else
  #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index 54edb01..34ee538 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3589,6 +3589,42 @@ kmem_add_extra_claims(void)
+ 	kmem_claims[kmem_claim_count++] = kmem_spec_data;
+ }
+ 
++#if defined(MIDO_4K_VM)
++__startup_func
++static void
++mido_kmem_claims_dump(uint32_t fail_idx, vm_map_offset_t cursor)
++{
++	vm_map_size_t lf = 0;
++	vm_map_entry_t e;
++	vm_map_offset_t prev;
++
++	vm_map_sizes(kernel_map, NULL, NULL, &lf);
++	printf("MIDO kmap %llx-%llx cur %llx lfree %lluM\n",
++	    (uint64_t)kernel_map->min_offset, (uint64_t)kernel_map->max_offset,
++	    (uint64_t)cursor, (uint64_t)(lf >> 20));
++	for (uint32_t k = 0; k < kmem_claim_count; k++) {
++		printf("%c%s %lluM%s", k == fail_idx ? '*' : ' ',
++		    kmem_claims[k].kc_name,
++		    (unsigned long long)(kmem_claims[k].kc_size >> 20),
++		    (k & 1) ? "\n" : " |");
++	}
++	printf("\n");
++	prev = kernel_map->min_offset;
++	for (e = vm_map_first_entry(kernel_map); e != vm_map_to_entry(kernel_map);
++	    e = e->vme_next) {
++		if (e->vme_start - prev >= (16ULL << 20)) {
++			printf("hole %llx-%llx %lluM\n", (uint64_t)prev,
++			    (uint64_t)e->vme_start, (uint64_t)((e->vme_start - prev) >> 20));
++		}
++		prev = e->vme_end;
++	}
++	if (kernel_map->max_offset - prev >= (16ULL << 20)) {
++		printf("hole %llx-%llx (tail)\n", (uint64_t)prev,
++		    (uint64_t)kernel_map->max_offset);
++	}
++}
++#endif
++
+ __startup_func
+ static void
+ kmem_scramble_ranges(void)
+@@ -3641,6 +3677,15 @@ kmem_scramble_ranges(void)
+ 		struct mach_vm_range *sp_range = sp.kc_range;
+ 		if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
+ 		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
++#if defined(MIDO_4K_VM)
++			mido_kmem_claims_dump(i, start);
++			start = kernel_map->min_offset;
++			if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
++			    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) == KERN_SUCCESS) {
++				printf("MIDO: claim %s placed on retry at %llx\n",
++				    sp.kc_name, (uint64_t)start);
++			} else
++#endif
+ 			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
+ 			    sp.kc_name);
+ 		}
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 6089db9..14c91e7 100644
 --- a/pexpert/arm/pe_fiq.c

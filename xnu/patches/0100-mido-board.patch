@@ -539,6 +539,24 @@ index 69b13f9..6086ed9 100644
  
  
  CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 42362c5..036ce82 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -399,7 +399,13 @@ arm_init(
+ 		/*
+ 		 * Select the advertised kernel page size.
+ 		 */
++#if defined(MIDO_BOARD)
++		uint32_t mido_vm16k = 0;
++		PE_parse_boot_argn("mido_vm16k", &mido_vm16k, sizeof(mido_vm16k));
++		if (mido_vm16k && args->memSize > 1ULL * 1024 * 1024 * 1024) {
++#else
+ 		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
++#endif
+ 			/*
+ 			 * arm64 device with > 1GB of RAM:
+ 			 * kernel uses 16KB pages.
 diff --git a/osfmk/arm/commpage/commpage_asm.s b/osfmk/arm/commpage/commpage_asm.s
 index da0bbba..669fe55 100644
 --- a/osfmk/arm/commpage/commpage_asm.s

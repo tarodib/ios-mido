@@ -1248,6 +1248,21 @@ edit('bsd/kern/bsd_init.c',
      '#if defined(MIDO_BOARD)\n#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)\n'
      '#elif DEBUG_BSDINIT\n#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)\n')
 
+# arm_init.c: > 1 GB RAM selects 16 KB VM pages over the 4 KB granule (the A9
+# PAGE_RATIO 4 mode). On mido (1.5 GB) build #12 panicked in that path:
+# vm_commpage_init -> commpage_populate -> pmap_enter -> write_pte_fast
+# "PTE write is unaligned". Use 4 KB VM pages = hardware pages (the <= 1 GB path);
+# boot-arg mido_vm16k=1 keeps the A9 mode for experiments.
+edit('osfmk/arm/arm_init.c',
+     '\t\tif (args->memSize > 1ULL * 1024 * 1024 * 1024) {\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\t\tuint32_t mido_vm16k = 0;\n'
+     '\t\tPE_parse_boot_argn("mido_vm16k", &mido_vm16k, sizeof(mido_vm16k));\n'
+     '\t\tif (mido_vm16k && args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
+     '#else\n'
+     '\t\tif (args->memSize > 1ULL * 1024 * 1024 * 1024) {\n'
+     '#endif\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

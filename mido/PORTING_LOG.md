@@ -422,6 +422,19 @@ NOT backed up: userdata (personal data — user to save it).
     - a 5 s thread_call heartbeat prints "MIDO tick N: bootstrap at <last stage>".
     If there are no ticks, timer wakeups are broken after the scheduler starts. If ticks show a
     fixed stage, that's the call that's stuck.
+- XNU boot #8 (build #12, run 42190525335, commit 1ec2523) gave a **panic** with a full panic log:
+  `write_pte_fast: PTE write is unaligned, ptep=0xffffffe0…, pte=0x4200000a2e54ec3 @pmap.c:623`.
+  - kscan backtrace: kernel_bootstrap_thread+0x374 → vm_commpage_init → commpage_populate →
+    pmap_enter_options_addr → pmap_enter_pte → write_pte_fast.
+  - The other panic-log fields: Kernel text base 0xfffffff007004000, "CORE 0 is the one that
+    panicked", 13 threads, compressor 0%.
+  - Cause: arm_init.c picks the advertised page size from RAM. With memSize > 1 GB it sets
+    PAGE_SHIFT_CONST = PAGE_MAX_SHIFT (14), i.e. 16 KB VM pages over the 4 KB granule. That's the
+    A9 PAGE_RATIO 4 mode; it's also why vm_page_bootstrap showed 95402 pages (×16K = 1.5 GB). This
+    ratio-4 path panics while mapping the commpage.
+  - Fix: under MIDO_BOARD use the ≤ 1 GB path (PAGE_SHIFT_CONST = ARM_PGSHIFT = 12), so VM page =
+    hardware page = 4 KB. Boot-arg `mido_vm16k=1` restores the A9 mode. iOS userland reads
+    vm_page_size at runtime, and its 16 KB-aligned segments map fine on 4 KB pages. → build #13.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

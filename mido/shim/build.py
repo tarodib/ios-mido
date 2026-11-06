@@ -14,7 +14,7 @@ READELF = os.path.join(TC, 'aarch64-none-elf-readelf.exe')
 CFLAGS = ['-O2', '-ffreestanding', '-nostdlib', '-fno-pic', '-mgeneral-regs-only',
           '-mstrict-align', '-fno-stack-protector', '-mcpu=cortex-a53', '-fno-builtin',
           '-fno-tree-loop-distribute-patterns', '-Wall', '-Wextra']
-SRCS = ['start.S', 'shim.c', 'console.c', 'sdhc.c', 'spmi.c', 'fdt.c', 'loader.c']
+SRCS = ['start.S', 'shim.c', 'console.c', 'sdhc.c', 'spmi.c', 'fdt.c', 'loader.c', 'input.c', 'rpm.c']
 OUT = os.path.join(HERE, 'out')
 
 

@@ -13,6 +13,7 @@
 #include "spmi.h"
 #include "fdt.h"
 #include "loader.h"
+#include "input.h"
 
 #define IMEM_RESTART_REASON 0x0860065cUL
 #define RESTART_BOOTLOADER  0x77665500U
@@ -430,10 +431,17 @@ void shim_main(uint64_t dtb)
 	con_putc('\n');
 	flush_log();
 	if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
+		input_setup();   /* touch power/clocks/pins for XNU's mido_input.c */
+		flush_log();
 		con_puts("\nLOADER:\n");
 		const char *why = loader_boot(dtb);   /* returns only if it does not boot */
 		con_puts(" NOT BOOTED: "); con_puts(why); con_putc('\n');
 		flush_log();     /* keep the refusal reason in the cache log too */
+		/* test image (no payload): input bring-up on a clean screen */
+		delay_ms(3000);
+		con_clear(C_NAVY);
+		input_test(25);
+		flush_log();
 	}
 	con_puts("EMMC CODE "); con_dec(emmc_code);
 	/* HOLD_BASE gives a person time to read the screen; runshim.ps1 subtracts it. */

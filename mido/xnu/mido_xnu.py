@@ -23,6 +23,14 @@ root = Path(sys.argv[1])
 failures = []
 
 
+def create(rel, text):
+    p = root / rel
+    if p.exists():
+        failures.append(f'{rel}: already exists')
+        return
+    p.write_text(text)
+
+
 def edit(rel, old, new, count=1):
     p = root / rel
     text = p.read_text()
@@ -1225,11 +1233,14 @@ edit(UFS,
      '\t\t}\n'
      '\t}\n'
      '#endif\n')
-# The SD730 button/touch/USB drivers poke sweet-only hardware.
+# The SD730 button/touch/USB drivers poke sweet-only hardware; mido has its own
+# read-only input poller (bsd/dev/mido_input.c, set up by the shim).
 edit(UFS,
      '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n',
      '#if !defined(MIDO_BOARD)\n'
      '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n'
+     '#else\n'
+     '\t{\n\t\textern void mido_input_init(void);\n\t\tmido_input_init();\n\t}\n'
      '#endif\n')
 
 # ---------------------------------------------------------------------------
@@ -1530,6 +1541,50 @@ edit(FB,
      '#endif\n'
      '\n'
      'bool\nIOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)\n')
+
+# ---------------------------------------------------------------------------
+# Input: FT5435 touch + power/volume/home keys (bsd/dev/mido_input.c, read-only;
+# the shim's input_setup powers and muxes the hardware). SweetHID normalises
+# touches against the presented display: on mido the whole 1080x1920 panel is
+# the (downsampled) 1242x2208 canvas, so normalise against the panel itself.
+# ---------------------------------------------------------------------------
+create('bsd/dev/mido_input.c',
+       (Path(__file__).resolve().parent / 'src' / 'mido_input.c').read_text())
+edit('bsd/conf/files',
+     'bsd/dev/sweet_touch.c\t\t\tstandard\n',
+     'bsd/dev/sweet_touch.c\t\t\tstandard\n'
+     'bsd/dev/mido_input.c\t\t\tstandard\n')
+HID = 'iokit/Kernel/arm/hid/SweetHID.cpp'
+edit(HID,
+     '\tfLogicalW = native ? 1080 : 1125;\n'
+     '\tfLogicalH = native ? 2400 : 2436;\n'
+     '\tfOffX = (fLogicalW - 1080) / 2;\n'
+     '\tfOffY = (fLogicalH - 2400) / 2;\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\t(void)native;\n'
+     '\tfLogicalW = 1080;                   /* panel = whole downsampled canvas */\n'
+     '\tfLogicalH = 1920;\n'
+     '\tfOffX = fOffY = 0;\n'
+     '#else\n'
+     '\tfLogicalW = native ? 1080 : 1125;\n'
+     '\tfLogicalH = native ? 2400 : 2436;\n'
+     '\tfOffX = (fLogicalW - 1080) / 2;\n'
+     '\tfOffY = (fLogicalH - 2400) / 2;\n'
+     '#endif\n')
+edit(HID,
+     '\ty = y < 0 ? 0 : (y > 2399 ? 2399 : y);\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\ty = y < 0 ? 0 : (y > 1919 ? 1919 : y);\n'
+     '#else\n'
+     '\ty = y < 0 ? 0 : (y > 2399 ? 2399 : y);\n'
+     '#endif\n')
+edit(HID,
+     '\tsetProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\tsetProperty("SurfaceHeight", (unsigned long long)(121 << 16), 32);	/* 5.5" 16:9 */\n'
+     '#else\n'
+     '\tsetProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);\n'
+     '#endif\n')
 
 if failures:
     print('MIDO EDIT FAILURES:')

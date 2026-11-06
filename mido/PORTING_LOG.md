@@ -616,9 +616,50 @@ NOT backed up: userdata (personal data — user to save it).
     range 384 = 0.0 .. 895 = 1.0, plane 1 = alpha). The D211 has a P3 panel, so backboardd uses
     wide colour. Copied raw as BGRA: black (384,384,384) → R6 G1 B128 (navy), white (895×3) → R253
     G255 B127 (pale yellow). This exactly matches the photo.
-  - Fix (run #24?): midoPresentScaled converts 'b3a8' pixels through a 1024-entry XR10 → 8-bit
-    table (clamped (v-384)*255/511) and logs "SWEET FB: converting b3a8 …" once. 8-bit surfaces
-    are still copied raw.
+  - Fix: midoPresentScaled converts 'b3a8' pixels through a 1024-entry XR10 → 8-bit table
+    (clamped (v-384)*255/511) and logs "SWEET FB: converting b3a8 …" once. 8-bit surfaces are
+    still copied raw. (Run #23 had only this; it was cancelled at the user's request so it could
+    ship together with input.)
+- **Input bring-up (touch + buttons), developed in the shim first** (shim/input.c,
+  shim-inputtest.img, no XNU).
+  - Hardware from mido.dtb, plus a read-only OrangeFox probe (tools/fox-hwprobe.sh). **Never
+    `cat /sys/kernel/debug/gpio` on MSM8953**: it dumps secure GPIOs and the XPU violation
+    resets the phone (it happened once).
+    - FT5435 `focaltech,5435` @0x38 on i2c@78b7000 (BLSP1 QUP3, qcom,i2c-msm-v2, 400 kHz);
+      reset gpio64, irq gpio65, 1080x1920; virtual keys at y=2040: x=200 menu(139),
+      500 home(172), 800 back(158).
+    - Supplies: vdd = pm8953_l10 2.85 V, vcc_i2c = pm8953_l6 1.8 V. OrangeFox has both enabled,
+      but **after LK, L10 is off**.
+    - Keys: vol_up = TLMM gpio85, active low (gpio-keys); power = PON KPDPWR, vol-down = PON
+      RESIN (qpnp-power-on @0x800).
+  - Test run 1: QUP reachable (HW 0x20070000; clocks on after the GCC_APCS vote bit 10 and the
+    QUP3 I2C CBCR 0x01804020). **All 3 keys toggle** (PON INT_RT_STS 0x810 b0/b1, gpio85 IN).
+    No I2C answer: L10 off (ST=00 EN=00, V=0x54).
+  - Test run 2: a direct SPMI write to L10 EN_CTL **reset the phone instantly** (RPM-owned
+    peripheral, arbiter violation).
+  - Test run 3: shim/rpm.c, a minimal RPM client like LK smd.c/rpm-smd.c.
+    - SMEM 0x86300000 legacy TOC; item 13 alloc table, `rpm_requests` (edge 0xf) **cid 4**;
+      port info at item 14+cid, FIFOs at item 338+cid (0x400 bytes each way).
+    - LK leaves the channel closed (TX 0 / RX 4); reset → OPENING → OPENED gives TX 2 / RX 2.
+    - Request `req` ldoa 10 {swen=1, uv=2850000, ma=40}; IPC doorbell 0x0b011008 bit 0.
+      **ACK 40 bytes**, then L10 ST=82 **VREG OK**, V=0x58 (2.85 V).
+    - Pin-mux search: blsp_i2c3 is **mux 2** (3 and 1 give I2C status errors). **FT5435
+      reg 0xA3 = 0x54**, 0xA8 = 0x3B.
+    - Touch reads from 0x02 (13 bytes): the first ~4 reads are all 0xFF while the firmware
+      boots, then a real drag trace (538,1375 → … → 974,1873 → 953,23), N=0 on lift. Keys
+      also work.
+  - shim `input_setup()` before every XNU jump: RPM L10, clocks, gpio10/11 mux 2, gpio65/85
+    pull-up inputs, reset pulse on gpio64. The RPM vote and the pin state persist into XNU.
+  - XNU `bsd/dev/mido_input.c` (mido/xnu/src/, installed by mido_xnu.py `create()`; mkpatch.sh
+    now `git add -N` so new files are in the diff), read-only:
+    - QUP v1 FIFO I2C; PON RT via SPMI observer EXT_READL; gpio65 IRQ / gpio85 vol+ reads.
+    - Thread polls every 10–15 ms; reads touch only while the IRQ is low or something is down.
+    - ≤ 2 fingers; the y ≥ 1920 key row is the centre key → Home.
+    - Events go to sweet_hid_touch / sweet_hid_key (0 power, 1 vol+, 2 vol-, 3 home).
+    - Started from sweet_ufs_init where ios-sweet starts its SD730 input. Boot-arg `midoinput=0`
+      disables it.
+  - SweetHID (MIDO): touches are normalised against the 1080x1920 panel (= the whole downsampled
+    canvas), y clamped at 1919, SurfaceHeight 121 mm.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

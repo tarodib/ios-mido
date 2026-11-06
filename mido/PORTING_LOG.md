@@ -884,3 +884,19 @@ on the phone. What it took after stage 2 (in order of discovery):
   run27's first boot needed tick ~216. Probably just the slow first boot; recheck.
 - Next: Mesa freedreno for iOS on top of this interface (libdrm-msm style shim), then
   backboardd/CoreAnimation through an EAGL replacement, then GPU present.
+
+### GPU step 3 started: Mesa freedreno for iOS (handoff)
+- Plan (approach after ios-sailfish, own code): Mesa 25.3.6 static, gallium freedreno +
+  GLES2, no EGL/GLX/platforms/LLVM; screen via fd_drm_screen_create_renderonly on a fake
+  fd; contexts via st_api_create_context; a midogl library emulating the libdrm/MSM ioctls
+  on MidoGPU (BO new/info/map, submit, wait fence, get param).
+- libdrm calls freedreno needs: drmCommandWrite/WriteRead, drmIoctl, drmGetVersion/
+  drmFreeVersion, drmGetCap, drmPrime{HandleToFD,FDToHandle}, drmOpenWithType, drmSyncobj*.
+- Mesa changes needed: build src/freedreno/drm on darwin (src/freedreno/meson.build
+  `system_has_kms_drm` gate; meson.build sets it false for darwin), route
+  fd_bo_map_os_mmap (freedreno_bo.c:613, os_mmap) to the midogl BO map.
+- Sparse checkout of mesa-25.3.6 in research/mesa-25.3 (src/freedreno/drm present;
+  src/freedreno/meson.build still to add to the sparse set).
+- Next: mido/gl/{mesa-ios.sh, include/xf86drm.h, mesa.patch} + a CI job that builds the
+  Mesa static libs for iOS; then midogl + a GLES triangle test via midogpu-style job.
+- Pending check: second boot of shim-boot-gpu2.img should reach the lock screen.

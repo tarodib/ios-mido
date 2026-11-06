@@ -435,6 +435,18 @@ NOT backed up: userdata (personal data — user to save it).
   - Fix: under MIDO_BOARD use the ≤ 1 GB path (PAGE_SHIFT_CONST = ARM_PGSHIFT = 12), so VM page =
     hardware page = 4 KB. Boot-arg `mido_vm16k=1` restores the A9 mode. iOS userland reads
     vm_page_size at runtime, and its 16 KB-aligned segments map fine on 4 KB pages. → build #13.
+- XNU boot #9 (build #13, run 42192383661, commit 2911552). The user reports
+  **"MIDO ticks: bootstrap at PE_lockdown_iokit"**.
+  - The commpage panic is gone, and timers and the scheduler work: the thread_call heartbeat keeps
+    firing.
+  - The bootstrap thread never logs another stage. Nothing is logged between PE_lockdown_iokit
+    and bsd_init's first printf, so the stall is in StartIOKitMatching (registerService is
+    async), vm_set_restrictions, kperf_init_early, or the start of bsd_init (throttle_init).
+  - Build #14 adds:
+    - "KB: PE_lockdown_iokit done" and "KB: bsd_init" marks;
+    - from tick 3 on, the heartbeat prints the bootstrap thread's state, wait_event and saved lr,
+      plus a frame-pointer backtrace from its kernel context (kstackptr →
+      thread_kernel_state.machine.ss), bounded to its kernel stack. Symbolize it with kscan.py.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

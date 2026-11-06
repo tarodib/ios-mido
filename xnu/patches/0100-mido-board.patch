@@ -1053,24 +1053,52 @@ index 6928957..53b7988 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
-index bec97fb..abfda3d 100644
+index bec97fb..8306423 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -218,9 +218,31 @@ extern int serverperfmode;
+@@ -218,9 +218,59 @@ extern int serverperfmode;
  
  TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
  
 +#if defined(MIDO_BOARD)
 +#include <kern/thread_call.h>
++#include <kern/thread_kernel_state.h>
 +static const char *volatile mido_boot_stage = "start";
 +static thread_call_t mido_tick_call;
 +static uint32_t mido_ticks;
++static thread_t mido_boot_thread;
++
++/* State, wait event and frame-pointer backtrace of a switched-out kernel thread. */
++static void
++mido_dump_thread(thread_t t)
++{
++	if (t == NULL || t == current_thread() || !t->machine.kstackptr || !t->kernel_stack) {
++		return;
++	}
++	arm_kernel_saved_state_t *ss = &((thread_kernel_state_t)t->machine.kstackptr)->machine.ss;
++	uint64_t lo = t->kernel_stack, hi = lo + kernel_stack_size, fp = ss->fp;
++	printf("MIDO boot thread: state 0x%x wait %p lr %llx\n", t->state,
++	    (void *)t->wait_event, ss->lr);
++	printf("MIDO bt:");
++	for (int i = 0; i < 16 && fp >= lo && fp + 16 <= hi && !(fp & 7); i++) {
++		const uint64_t *f = (const uint64_t *)fp;
++		printf(" %llx", f[1]);
++		if ((i & 3) == 3) {
++			printf("\n       ");
++		}
++		fp = f[0];
++	}
++	printf("\n");
++}
 +
 +static void
 +mido_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 +{
 +	uint64_t deadline;
 +	printf("MIDO tick %u: bootstrap at %s\n", ++mido_ticks, mido_boot_stage);
++	if (mido_ticks >= 3) {
++		mido_dump_thread(mido_boot_thread);
++	}
 +	clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
 +	thread_call_enter_delayed(mido_tick_call, deadline);
 +}
@@ -1088,7 +1116,7 @@ index bec97fb..abfda3d 100644
  	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
  	    startup_phase >= STARTUP_SUB_KPRINTF) {
  		kprintf("kernel_bootstrap: %s\n", message);
-@@ -231,6 +253,10 @@ kernel_bootstrap_log(const char *message)
+@@ -231,6 +281,10 @@ kernel_bootstrap_log(const char *message)
  static inline void
  kernel_bootstrap_thread_log(const char *message)
  {
@@ -1099,13 +1127,14 @@ index bec97fb..abfda3d 100644
  	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
  	    startup_phase >= STARTUP_SUB_KPRINTF) {
  		kprintf("kernel_bootstrap_thread: %s\n", message);
-@@ -623,6 +649,14 @@ kernel_bootstrap_thread(void)
+@@ -623,6 +677,15 @@ kernel_bootstrap_thread(void)
  	 * Thread callout service.
  	 */
  	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
 +#if defined(MIDO_BOARD)
 +	{
 +		uint64_t deadline;
++		mido_boot_thread = current_thread();
 +		mido_tick_call = thread_call_allocate(mido_tick, NULL);
 +		clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
 +		thread_call_enter_delayed(mido_tick_call, deadline);
@@ -1114,6 +1143,26 @@ index bec97fb..abfda3d 100644
  
  	/*
  	 * Remain on current processor as
+@@ -771,6 +834,9 @@ kernel_bootstrap_thread(void)
+ #ifdef  IOKIT
+ 	kernel_bootstrap_log("PE_lockdown_iokit");
+ 	PE_lockdown_iokit();
++#if defined(MIDO_BOARD)
++	kernel_bootstrap_log("PE_lockdown_iokit done");
++#endif
+ #endif
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+@@ -786,6 +852,9 @@ kernel_bootstrap_thread(void)
+ 	/*
+ 	 *	Start the user bootstrap.
+ 	 */
++#if defined(MIDO_BOARD)
++	kernel_bootstrap_log("bsd_init");
++#endif
+ #ifdef  MACH_BSD
+ 	bsd_init();
+ #endif
 diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
 index 182b44a..2fc5105 100644
 --- a/osfmk/kern/zalloc.c

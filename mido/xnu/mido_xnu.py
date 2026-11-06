@@ -597,6 +597,24 @@ edit('osfmk/vm/vm_kern.c',
      '\t\t\t    sp.kc_name);\n'
      '\t\t}\n')
 
+# vm_compressor: the build #9 dump showed the largest kernel-map hole is 46621M,
+# but zones (24576M) + compressor (24562M, the macOS pool of 16 x 1.5 GB RAM) already
+# exceed it, so kmem_add_extra_claims underflowed (kmem_ptr_range 128 TB, data 16 EB).
+# Cap the pool at 4 x RAM (6 GB) unless the vm_compression_limit boot-arg is given.
+edit('osfmk/vm/vm_compressor.c',
+     '\tif (compressor_pool_size > VM_COMPRESSOR_MAX_POOL_SIZE) {\n'
+     '\t\tcompressor_pool_size = VM_COMPRESSOR_MAX_POOL_SIZE;\n'
+     '\t}\n',
+     '\tif (compressor_pool_size > VM_COMPRESSOR_MAX_POOL_SIZE) {\n'
+     '\t\tcompressor_pool_size = VM_COMPRESSOR_MAX_POOL_SIZE;\n'
+     '\t}\n'
+     '#if defined(MIDO_4K_VM)\n'
+     '\t/* mido: the 4K kernel map has a ~46 GB hole; zones take 24 GB of it */\n'
+     '\tif (vm_compression_limit == 0 && compressor_pool_size > 4ULL * max_mem) {\n'
+     '\t\tcompressor_pool_size = 4ULL * max_mem;\n'
+     '\t}\n'
+     '#endif\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

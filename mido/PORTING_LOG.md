@@ -324,6 +324,19 @@ NOT backed up: userdata (personal data — user to save it).
     prints the map bounds, the cursor, the largest free hole, every claim and size (the failing
     one marked with *), and every hole ≥ 16 MB. It then retries the claim from the bottom of the
     map before panicking.
+- XNU boot #5 (build #9, run 42184628559, commit 4ab8897). The dump worked:
+  - kmap fffffe0000000000-fffffffbffffffff (VM_MIN is -2 TB in this config, everything below the
+    kernel is reserved). Holes: fffffff002590000-fffffff006000000 (58M) and
+    **fffffff09e000000-fffffffbffdfc000 (46621M)**, which is the largest.
+  - Claims: zones 24576M, **compressor 24562M**, gIOKitPageableFixed0-3 96M each, ipc_kernel_map
+    64M, mb 64M, bsd_pageable 34M, zone_meta 28M, io_submap 8M, ipc_kernel_copy_map 8M,
+    bufferhdr 1M. That's over 46621M, so `largest_free_size -= total_claims` underflowed:
+    kmem_ptr_range 134192379M, kmem_data_range 17592051823687M. compressor failed first; the retry
+    placed it, then kmem_ptr_range panicked (@vm_kern.c:3690).
+  - Cause: the macOS compressor pool is 16 x max_mem (24 GB for 1.5 GB of RAM).
+  - Fix: under MIDO_4K_VM cap the pool at 4 x max_mem (6 GB) unless the vm_compression_limit
+    boot-arg is set. Fixed claims are about 31 GB, leaving about 15 GB for the ptr/sprayqtn/data
+    ranges. → build #10.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

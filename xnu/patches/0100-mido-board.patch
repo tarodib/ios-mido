@@ -467,6 +467,21 @@ index 6b926fe..f6d5e98 100644
  	return 0;
  }
  
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..3ce66f1 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -492,7 +492,9 @@ bsd_init(void)
+ 
+ #define DEBUG_BSDINIT 0
+ 
+-#if DEBUG_BSDINIT
++#if defined(MIDO_BOARD)
++#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)
++#elif DEBUG_BSDINIT
+ #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+ #else
+ #define bsd_init_kprintf(x, ...)
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index 2545cf9..e00e1b6 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
@@ -1019,6 +1034,68 @@ index 6928957..53b7988 100644
  #define EARLY_STRIDE (4320u / 4)
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index bec97fb..abfda3d 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -218,9 +218,31 @@ extern int serverperfmode;
+ 
+ TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
+ 
++#if defined(MIDO_BOARD)
++#include <kern/thread_call.h>
++static const char *volatile mido_boot_stage = "start";
++static thread_call_t mido_tick_call;
++static uint32_t mido_ticks;
++
++static void
++mido_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	uint64_t deadline;
++	printf("MIDO tick %u: bootstrap at %s\n", ++mido_ticks, mido_boot_stage);
++	clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
++	thread_call_enter_delayed(mido_tick_call, deadline);
++}
++#endif
++
+ static inline void
+ kernel_bootstrap_log(const char *message)
+ {
++#if defined(MIDO_BOARD)
++	mido_boot_stage = message;
++	if (startup_phase >= STARTUP_SUB_KPRINTF) {
++		printf("KB: %s\n", message);
++	}
++#endif
+ 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 		kprintf("kernel_bootstrap: %s\n", message);
+@@ -231,6 +253,10 @@ kernel_bootstrap_log(const char *message)
+ static inline void
+ kernel_bootstrap_thread_log(const char *message)
+ {
++#if defined(MIDO_BOARD)
++	mido_boot_stage = message;
++	printf("KBT: %s\n", message);
++#endif
+ 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 		kprintf("kernel_bootstrap_thread: %s\n", message);
+@@ -623,6 +649,14 @@ kernel_bootstrap_thread(void)
+ 	 * Thread callout service.
+ 	 */
+ 	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
++#if defined(MIDO_BOARD)
++	{
++		uint64_t deadline;
++		mido_tick_call = thread_call_allocate(mido_tick, NULL);
++		clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
++		thread_call_enter_delayed(mido_tick_call, deadline);
++	}
++#endif
+ 
+ 	/*
+ 	 * Remain on current processor as
 diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
 index 182b44a..2fc5105 100644
 --- a/osfmk/kern/zalloc.c

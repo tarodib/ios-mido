@@ -1193,6 +1193,61 @@ edit(UFS,
      '\tsweet_keys_init();\n\tsweet_touch_init();\n\tsweet_usb_probe();\n'
      '#endif\n')
 
+# ---------------------------------------------------------------------------
+# Boot progress diagnostics (build #12). Build #11 stops after the SWEET IOKit
+# drivers and never prints bsd_init's copyright: kernel_bootstrap_thread is
+# stuck between trust_cache_init and bsd_init. Print the bootstrap stages and
+# bsd_init steps on the console, and a 5 s heartbeat (thread_call) naming the
+# last bootstrap stage, which also shows whether timer wakeups still work.
+# ---------------------------------------------------------------------------
+edit('osfmk/kern/startup.c',
+     'static inline void\nkernel_bootstrap_log(const char *message)\n{\n',
+     '#if defined(MIDO_BOARD)\n'
+     '#include <kern/thread_call.h>\n'
+     'static const char *volatile mido_boot_stage = "start";\n'
+     'static thread_call_t mido_tick_call;\n'
+     'static uint32_t mido_ticks;\n'
+     '\n'
+     'static void\n'
+     'mido_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)\n'
+     '{\n'
+     '\tuint64_t deadline;\n'
+     '\tprintf("MIDO tick %u: bootstrap at %s\\n", ++mido_ticks, mido_boot_stage);\n'
+     '\tclock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);\n'
+     '\tthread_call_enter_delayed(mido_tick_call, deadline);\n'
+     '}\n'
+     '#endif\n'
+     '\n'
+     'static inline void\nkernel_bootstrap_log(const char *message)\n{\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tmido_boot_stage = message;\n'
+     '\tif (startup_phase >= STARTUP_SUB_KPRINTF) {\n'
+     '\t\tprintf("KB: %s\\n", message);\n'
+     '\t}\n'
+     '#endif\n')
+edit('osfmk/kern/startup.c',
+     'static inline void\nkernel_bootstrap_thread_log(const char *message)\n{\n',
+     'static inline void\nkernel_bootstrap_thread_log(const char *message)\n{\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tmido_boot_stage = message;\n'
+     '\tprintf("KBT: %s\\n", message);\n'
+     '#endif\n')
+edit('osfmk/kern/startup.c',
+     '\tkernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);\n',
+     '\tkernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\t{\n'
+     '\t\tuint64_t deadline;\n'
+     '\t\tmido_tick_call = thread_call_allocate(mido_tick, NULL);\n'
+     '\t\tclock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);\n'
+     '\t\tthread_call_enter_delayed(mido_tick_call, deadline);\n'
+     '\t}\n'
+     '#endif\n')
+edit('bsd/kern/bsd_init.c',
+     '#if DEBUG_BSDINIT\n#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)\n',
+     '#if defined(MIDO_BOARD)\n#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)\n'
+     '#elif DEBUG_BSDINIT\n#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

@@ -379,6 +379,49 @@ NOT backed up: userdata (personal data — user to save it).
      - It prints "MIDO LSE: emulating ..." once.
      - **SMP limitation:** this isn't atomic against other cores, so userland must stay on
        cpus=1 until there is an IPI-based stop-the-world or a per-core scheme.
+- **Root image (in progress):**
+  - Downloaded iPhone_5.5_P3_16.7.16_20H392_Restore.ipsw (iPhone10,5, 6.2 GB) to WSL ~/fw/ipsw-10,5
+    with `ipsw download`. BuildManifest (d211ap, Customer Erase): OS 087-86694-044.dmg,
+    Cryptex1,SystemOS 087-86588-047.dmg, Cryptex1,AppOS 087-86715-047.dmg.
+  - DeviceTree.d211ap.im4p was extracted to xnu/adt/d211ap.adt (not in git).
+    `mkadt_mido.py ..\xnu\adt\mido.adt --product ..\xnu\adt\d211ap.adt` now gives a 12504-byte ADT
+    with the real /product node.
+  - tools/wsl-mkroot.sh: mkiosroot.sh had CRLF from the Windows checkout, so it runs from an
+    LF copy. mkfs.hfsplus worked (16 GB journaled volume), but the **mount fails: the WSL2 kernel
+    6.18.54.1 has CONFIG_HFSPLUS_FS unset** (no module either).
+  - Options:
+    - (a) build hfsplus.ko out-of-tree from microsoft/WSL2-Linux-Kernel tag
+      linux-msft-wsl-6.18.54.1 and insmod it (tools/wsl-hfsplus-ko.sh; needs user approval);
+    - (b) do the copy on the phone from OrangeFox if its kernel has hfsplus (tar over adb);
+    - (c) a custom WSL kernel via .wslconfig.
+  - The user approved (a). tools/wsl-hfsplus-ko.sh ran: `fs/hfsplus` built against the WSL tag
+    with `/proc/config.gz`, and `insmod` printed HFSPLUS_LOADED. It's not persistent: re-run after
+    `wsl --shutdown`.
+  - **Root image built** (wsl-mkroot.sh):
+    - fsck reports "volume iOSRoot appears to be OK"; 12G of 16G used.
+    - Tweaks applied: 7 _PanicOnCrash renamed, 2 CommCenter jobs removed, containers created,
+      VirtualAudio disabled, StartRecorderServer off (D21, D211 and Default), and the
+      migration/springboard/purplebuddy prefs.
+    - Warning: "no mobileactivationd system container in the image; skipped data ark".
+    - Output: ~/fw/ipsw-10,5/root/ios16-root.img (16 GiB) and ios16-root.simg (12.1 GB), copied
+      to C:\Users\user\ios-mido\rootimg (not in git).
+- XNU boot #7 (build #11, run 42188237947, commit 0df6210): read-only eMMC test with
+  `rd=ufsroot0` and no `ufsrw`, plus the /product ADT. kscan is clean. Shim jumped.
+  - The photo matches build #10: the SWEET drivers run up to `SWEET BATTERY: static fallback`,
+    then nothing. There's **no SWEET UFS line and no bsd_init copyright**, so the eMMC code never
+    ran and the root image wasn't flashed.
+  - Ordering: the AMFI, vnguard and trust-cache lines (kernel_bootstrap_thread, after
+    PE_init_iokit) come *before* the SWEET platform expert. The SWEET drivers start on IOKit
+    matching threads after PE_lockdown_iokit → StartIOKitMatching.
+  - So kernel_bootstrap_thread is stuck, or never rescheduled, between trust_cache_init and
+    bsd_init: LOCKDOWN startup, OSKextRemoveKextBootstrap, machine_lockdown, PE_lockdown_iokit,
+    vm_set_restrictions or kperf_init_early.
+  - Build #12 adds diagnostics:
+    - kernel_bootstrap_log and _thread_log print "KB:/KBT: <stage>" on the console;
+    - bsd_init_kprintf becomes printf;
+    - a 5 s thread_call heartbeat prints "MIDO tick N: bootstrap at <last stage>".
+    If there are no ticks, timer wakeups are broken after the scheduler starts. If ticks show a
+    fixed stage, that's the call that's stuck.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

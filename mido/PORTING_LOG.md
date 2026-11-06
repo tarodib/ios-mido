@@ -1,0 +1,222 @@
+# iOS 16 → Redmi Note 4 (mido) — Porting Log
+
+References: ios-sweet (Redmi Note 10 Pro, XNU xnu-8796 + iPhone X iOS 16.7.16 userland, shim boot),
+hackiosx.dev porting guide / compatibility notes.
+
+## 2026-11-06 — Session 1: recon + backups
+
+### Host
+- Windows 11, adb/fastboot (Minimal ADB) present, Python present.
+- MISSING: WSL/Linux (needed for HFS+/APFS tools, mkbootimg, aarch64 gcc), git, gh CLI.
+- XNU builds on GitHub macOS runners (needs a GitHub account + fork of ios-sweet).
+
+### Device (read from OrangeFox, adb root)
+| Item | Value | Implication |
+|---|---|---|
+| SoC | MSM8953 (Snapdragon 625), 8× Cortex-A53 r0p4 | ARMv8.0 — no LSE, RDM, FP16 |
+| Page granules | A53 supports 4 KB / 64 KB only | **No 16 KB pages → need a 4 KB-page XNU build** (as UniXNU / Redmi Note 12 ports do) |
+| RAM | ~2.9 GB (3 GB variant) | OK (Pixel 2016 port runs iOS 16 in 2 GB) |
+| Interrupt controller | `qcom,msm-qgic2` @ 0x0B000000 (**GICv2**) | ios-sweet assumes GICv3 → new GICv2 driver needed |
+| Timer | arch_timer, 19.2 MHz (PPI 20 via MPM) | standard |
+| Storage | eMMC, `sdhci` @ 0x07824900 | ios-sweet is UFS-only → **new SDHCI-MSM eMMC driver** |
+| UART | msm_serial_dm @ 0x078B0000 (ttyMSM0, 115200) | early console possible if test points are wired |
+| Display | NT35596 Tianma FHD, **video mode**, 1080×1920, splash @ 0x90001000 | Reuse bootloader framebuffer; refreshes on its own (good) |
+| Touch | FocalTech FT5435 @ i2c-3 (0x78B7000) addr 0x38 | new touch driver; power via RPM (not RPMh) |
+| Bootloader | Qualcomm LK (aboot), unlocked (verifiedbootstate=orange) | boot.img v0/v1 + appended QCOM DTB, not ABL/UEFI → shim must be repackaged |
+| userdata | mmcblk0p49, 23 GB, **19 GB in use** | iOS root (16 GB) goes here → **wipes Android data** |
+
+Raw DTB: `hw/mido.dtb`.
+
+### Backups (done, verified)
+All firmware/calibration partitions + system pulled to `backup/stock/`
+(persist, modemst1/2, fsg, fsc, modem, boot, recovery, aboot, sbl1, tz, rpm, dsp, splash, …).
+SHA-256 of persist/modemst1/modemst2/fsg/fsc/boot/aboot matches on device and host
+(`backup/stock/SHA256SUMS-device.txt`). Restore any of them with
+`fastboot flash <name> backup/stock/<name>.img`.
+NOT backed up: userdata (personal data — user to save it).
+
+### Gap analysis vs ios-sweet
+1. Boot chain: LK aboot → `fastboot boot shim.img` (v0 header + appended msm8953 DTB with matching msm-id/board-id) → shim → XNU.
+2. XNU: rebuild xnu-8796 with 4 KB pages (PAGE_SHIFT 12) for Cortex-A53; check iOS userland for ARMv8.1+ instructions
+   (the hackiosx guide says iPhone 8 firmware runs on ARMv8.0 without emulation in the Pixel 2016 port, so use iPhone 8 (iPhone10,x) firmware, not iPhone X).
+3. New drivers: GICv2, SDHCI-MSM eMMC (bootloader leaves eMMC up → can start from warm state), FT5435 touch, RPM regulator for touch power.
+4. ADT: generate from mido.dtb (memory map avoiding modem/TZ/qseecom reserved regions, 8 CPUs via PSCI, framebuffer).
+5. Logging: reserved-RAM log buffer → pull from OrangeFox after reboot (as ios-sweet does), plus framebuffer text.
+
+## 2026-11-06 — Session 1 (cont.): toolchain + M1 shim
+
+### Host tooling (no WSL yet — needs admin)
+- Installed git 2.56, gh 2.103, Python 3.12 (user scope).
+- Arm GNU Toolchain 13.3.rel1 `aarch64-none-elf` (Windows, no admin) → `toolchain/`.
+- `wsl --install` / `winget install Microsoft.WSL` both fail: **needs an elevated shell** (user action).
+- ios-sweet cloned to `upstream/ios-sweet` @ 45263be (2026-10-23).
+- Own tools: `tools/dtdump.py` (FDT reader), `tools/bootimg.py` (LK boot.img v0 info/unpack/pack).
+
+### Boot-chain facts (stock boot.img)
+- boot.img v0, page 2048, base 0x80000000, kernel 0x80008000, ramdisk 0x81000000, tags 0x80000100.
+- Kernel = **Image.gz + appended DTB** (msm-id 0x125, board-id 0xb). No QCDT dt.img.
+- `fastboot oem device-info`: unlocked, critical unlocked.
+
+### More hardware addresses (from DT)
+- GICv2: GICD 0x0B000000, GICC 0x0B002000. Arch timer PPIs 2/3/4/1 (sec-phys 18, ns-phys 19, virt 20, hyp 17).
+- PS_HOLD 0x004AB000; IMEM restart_reason 0x0860065C; PSCI 1.0 via SMC; all CPUs `enable-method = psci`.
+- eMMC sdhci-msm: 0x07824900 (+ core 0x07824000), IRQs SPI 0x7b / 0x8a.
+- UART BLSP1 0x078AF000 (enabled), 0x078B0000 (disabled).
+- Memory: 0x40000000–0xC0000000 (2 GB @1G + 2 GB @2G banks in DT; ~2.9 GB usable).
+  Reserved: 0x84A00000+1E00000 other_ext, 0x86C00000+6A00000 modem, 0x8D600000+1100000 adsp,
+  0x8E700000+700000 wcnss, 0x90001000+13FF000 splash, 0x9FF00000+100000 pstore.
+
+### M1 test 1 — `shim/` (start.S + shim.c, built by `shim/build.py`)
+- Paints 3 bands into splash fb (24bpp blue/red | white | green), waits 20 s,
+  writes restart_reason=bootloader, PSCI SYSTEM_RESET, PS_HOLD fallback.
+- `fastboot boot shim/out/shim-boot.img` → LK: OKAY. Phone then booted **Android**
+  ~22 s later (uptime 58 s at t≈80 s).
+- **Observation:** our code ran (20 s hold + reset timing). **Not honoured:** IMEM
+  restart reason → LK on 8953 likely reads PMIC PON SOFT_RB_SPARE instead. TODO.
+- **User observed:** top RED, middle WHITE, bottom GREEN, all solid, no stripes.
+  → **Framebuffer = 24bpp, 1080×1920, stride 3240 bytes, byte order B,G,R** (byte 0 = blue)
+  at 0x90001000; LK leaves the video-mode panel scanning it after `fastboot boot`.
+- **M1 DONE** (code runs + visible output).
+
+## 2026-11-06 — Session 2 (after host reboot)
+
+### Host
+- WSL2 installed by user (admin). Ubuntu-24.04 distro registered (`wsl --install -d Ubuntu-24.04 --web-download --no-launch`, no admin needed).
+- apt: build-essential, gcc-aarch64-linux-gnu, hfsprogs, img2simg, mkbootimg, dtc, cmake, fuse3 dev libs. Checked by `tools/wsl-check.sh`.
+- **Blocked:** `tools/wsl-setup-tools.sh` (build apfs-fuse from GitHub, fetch blacktop/ipsw release)
+  was refused by the agent's safety classifier (downloads and runs third-party code). Needs user approval.
+
+### M1.5 diagnostic shim (`shim/shim.c`, `shim/console.c`)
+- Original 5×7 font text console, BGR888, 4× scale (45×60 chars).
+- Probes: EL, MIDR/MPIDR, MMFR0 (16K granule), ISAR0 (LSE), PSCI version + CPU_ON ×7,
+  GICv2 vtimer IRQ (INTID 20) count, SPMI PMIC-arb v2 PON channel + registers.
+- Reboot to fastboot by itself:
+  - Run 1: IMEM restart_reason + PON warm reset → still booted Android (~40 s). Shim ran to completion.
+  - Run 2: + `PON_SOFT_RB_SPARE[7:2] = 2` → **BACK IN FASTBOOT after 35 s.** ✅
+    → LK on mido uses the PON spare reboot register (USE_PON_REBOOT_REG); IMEM reason alone is ignored.
+- Log retrieval:
+  - pstore 0x9FF00000 unusable: Android/recovery ramoops wipes non-ramoops data.
+  - Moved RAM log to 0x8EC00000 (inside no-map wcnss_fw_region).
+  - **The backed-up OrangeFox (recovery.img, kernel 3.18.71) has no /dev/mem, kcore or kmem**
+    (CONFIG_DEVMEM off; MODULES=y + MODVERSIONS). The OrangeFox the phone was originally in
+    ran kernel 4.9.326 (zeelog), so the recovery partition doesn't hold the same build.
+  - Plan: eMMC (SDHCI) write path in shim → log to `cache` partition (256 MB, unused) → `adb pull`.
+    Until then: read results from screen / photo.
+- Android on the phone is LineageOS (adb product `lineage_mido`), no root.
+
+### M1.5 results (read off the screen by the user)
+| Probe | Result | Consequence |
+|---|---|---|
+| 16K PAGES | **NO** | XNU must be built with **4 KB pages** (ARM_PGSHIFT 12), like UniXNU / Redmi Note 12 ports. ios-sweet's 16K kernel can't run here at all. |
+| LSE ATOMICS | **NO** | Kernel built for ARMv8.0 (`-mcpu=cortex-a53`, no outline-atomics assumptions). Userland: use iPhone 8 firmware (reported ARMv8.0-clean on Pixel 2016) **and verify** by scanning dyld_shared_cache for CAS/LDADD/SWP etc.; fallback = undef-instruction emulation in XNU. |
+| CPUS ONLINE | **8/8** | PSCI CPU_ON works for MPIDR 0x0–0x3, 0x100–0x103 → ios-sweet's SMP patch approach (0065/0078) carries over. |
+| VTIMER IRQS / 300 ms | **29** (expect ~30), other 0 | GICv2 distributor/CPU interface + virtual timer PPI (INTID 20) work from NS-EL1. Needs a GICv2 interrupt controller driver in XNU (ios-sweet is GICv3-only). |
+
+**M1.5 DONE.** Hardware basics needed by XNU (CPU, SMP, IRQ, timer) all confirmed.
+
+### Tooling
+- User approved one exact run of `tools/wsl-setup-tools.sh`: apfs-fuse 66b86bd (built) and ipsw 3.1.739 in `/root/tools/bin` (WSL).
+  Each further use of these binaries needs the user's OK (agent classifier rule).
+
+### GitHub
+- User ran `gh auth login` → logged in as `tarodib`.
+- `gh repo fork dipa-studio/ios-sweet --fork-name ios-mido` was **refused by the agent's safety
+  classifier** (creates a public repo). Needs the user to fork it themselves or explicitly allow it.
+
+### eMMC driver v0 (`shim/sdhc.c`) — PIO, single-block CMD17/CMD24
+- Reference (Linux): cache = mmcblk0p25, LBA 7471104, 524288 sectors, unmounted. eMMC "RX1BMB", 61071360 sectors.
+  GPT LBA0–33 saved to `hw/gpt-lba0-33.bin`; host parse agrees (entry 25).
+- Sequence: re-enable HC mode (core+0x78) → CMD13 / CMD5 awake / CMD7 select with RCA 2 then 1 →
+  read LBA0 (0xAA55), LBA1 ("EFI PART"), find "cache" in GPT → writes allowed ONLY to
+  [7471104, 7471104+128) and only on an exact GPT match → write 64 KB RAM log, read back.
+- Run 1: back in fastboot after 25 s, but **no log in cache** (cache still holds its original ext4,
+  superblock at 0x400). GPT md5 on device == backup → nothing written anywhere. One of init/read/GPT
+  checks failed and the guards refused. Need the on-screen EMMC lines to see which.
+
+### GitHub fork
+- User approved the exact fork command → **https://github.com/tarodib/ios-mido** (fork of dipa-studio/ios-sweet, branch main).
+
+### eMMC driver, runs 2–4 (side channel: hold = 5 s + 4 s × code, decoded by `tools/runshim.ps1`)
+- Photo of run 1 screen: `HC_MODE 0→1`, `PRES=01F80000`, `HCTL=00000030` (**bus power OFF**),
+  `CLK=000F0003` (internal clk on, **SD clk off**), `HCTL2=00030000` (HS200 timing left selected).
+- Run 2: + bus power via MSM PWRCTL handshake (core+0xDC/E0/E4/E8) → code 2 (power OK now; wake path
+  CMD13/CMD5/CMD7 never reaches TRAN — HS200 state/DLL presumably lost in LK's mode switch).
+- Run 3: full re-init (legacy timing, 1-bit, SDHCI divider ≈400 kHz, CMD0/CMD1…) → **code 10: CMD1 never ready**.
+  Suspect the SDHCI internal divider is ignored on MSM (Linux uses ALWAYS_USE_BASE_CLOCK and sets
+  the rate in GCC) and/or vendor HS400 clock routing (CORE_VENDOR_SPEC MCLK_SEL / SELECT_IN) still active.
+- Next: program GCC SDCC1 RCG (0x01842004) to 400 kHz from XO, divider bypass, reset vendor clock
+  routing + DLL, then 25 MHz from GPLL0 for data.
+
+### eMMC runs 5–7 → **WORKING** ✅
+- Run 5 (GCC SDCC1 RCG 0x01842004 → 400 kHz from XO, SDHCI divider bypass): GCC readback proves the
+  offsets (before CFG=0x205 = GPLL4/3 ≈ 384 MHz HS400; after CFG=0x2017; CBCR=0x4FF1 running).
+  Still CMD1 **command timeout** (ERRSTS=0001).
+- Run 6 (+ PM8953 L5/L8 status via SPMI SID1 0x44/0x47, TLMM SDC1 pads 0x0110A000, Linux-style
+  CORE_POWER SW_RST + HC_MODE_EN|FF_CLK_SW_RST_DIS + SDHCI RESET_ALL):
+  L5 `ST=82 EN=80` (1.8 V vccq on), L8 `ST=82 EN=80` (2.9 V vcc on), pads already active (0x9FE4).
+  Still timeout. Diagnostic line `VS=00000000` exposed the bug →
+- **Root cause:** in 3.18 sdhci-msm (MCI present) `CORE_VENDOR_SPEC` (0x10C) and `CORE_DLL_CONFIG`
+  (0x100) are offsets from the **SDHCI base 0x07824900**, not the core block. After the core reset the
+  **IO pads were left in 3 V mode** while VCCQ is 1.8 V, so the controller never saw the card's response.
+- Run 7: VENDOR_SPEC 0x358B1C → 0x18A1C (MCLK_SEL default, SELECT_IN off,
+  IO_PAD_PWR_SWITCH_EN|IO_PAD_PWR_SWITCH = 1.8 V pads), DLL reset+PDN, HCTL2 1.8 V signaling
+  (IO_LOW pwr request 0x04 acked) →
+  `CMD1 OCR=C0FF8080` (ready, sector mode), CMD2/3(RCA 2)/7 → TRAN at 25 MHz (GPLL0/16·½, legacy, 1-bit),
+  LBA0 AA55, LBA1 GPT, cache #25 matches Linux, **64 KB log written + verified + auto-pulled**.
+- Working bring-up sequence (= what the XNU eMMC driver must do after LK):
+  1. CORE_POWER(core+0) SW_RST; HC_MODE(core+0x78)=HC_MODE_EN|FF_CLK_SW_RST_DIS; SDHCI RESET_ALL
+  2. Bus power 0x0D → ack PWRCTL (core+0xDC/E4/E8) BUS_ON
+  3. VENDOR_SPEC(hc+0x10C): MCLK_SEL=2, clear SELECT_IN, set IO_PAD_PWR_SWITCH(_EN); DLL(hc+0x100) RST|PDN
+  4. HCTL2 1.8 V signaling → ack IO_LOW; legacy timing, 1-bit
+  5. GCC SDCC1 RCG: XO/12·¼ = 400 kHz; SDHCI divider 0; CMD0, CMD1 (0x40FF8080) until ready, CMD2, CMD3, CMD7
+  6. GCC SDCC1 RCG: GPLL0/16·½ = 25 MHz. (Later: 8-bit + HS200/HS400 with tuning for speed.)
+- **Test loop is now fully automatic:** `tools/runshim.ps1` builds, boots, decodes the timing code,
+  boots OrangeFox from RAM and pulls the log from `cache` (`shim/out/shimlog.txt`). No photos needed.
+
+### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
+- Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.
+- `tools/isa-scan.py`: v1 scanned whole executable mappings → ~190k "LSE" hits, almost all
+  **false positives** (__TEXT constants/strings). v2 scans only S_ATTR_PURE_INSTRUCTIONS sections of
+  all 2705 images (1476 MB code). Report: `hw/isa-scan-iPhone10,4-20H392.txt`.
+- Real (objdump-verified) ARMv8.1+ code:
+  - **LSE atomics ~860 sites**: libdispatch (629), libsystem_pthread (82), libsystem_platform (72),
+    libsystem_malloc (20), ActionKit, libsystem_m, libcorecrypto, libMobileGestalt, **dyld (1)**, …
+  - **FP16 (fmul v.8h etc.)**: libBNNS (1290) + 1 site in ~24 media/store frameworks.
+  - RDM / AudioCodecs-CASP hits decode as undefined → false positives. Dot product: 0. LDAPR: 1 (ActionKit).
+- Disassembly around libdispatch hits (`tools/dsc-extract.py`): **inline, unguarded** `ldadd`/`cas`
+  (no commpage feature check, no LL/SC fallback) → will raise undefined-instruction on Cortex-A53.
+- **Decision: XNU needs an EL0 undefined-instruction emulator** for LSE (LDADD/LDCLR/LDEOR/LDSET/
+  LD{S,U}{MAX,MIN}/SWP/CAS/CASP, all size/acquire/release variants) using LDXR/STXR on the user
+  address with copyio-style fault recovery. FP16 emulation later (libBNNS/ML only, rare).
+  Alternative for performance later: patch the cache to branch to LL/SC thunks.
+  The hackiosx claim that iPhone 8 firmware is ARMv8.0-clean does NOT hold for 16.7.16.
+
+## HANDOFF (current plan)
+Done: M1 (code runs), M1.5 (CPU/SMP/GIC/timer/PMIC facts), eMMC read+write in shim, automatic log loop,
+userland ISA analysis, GitHub fork tarodib/ios-mido.
+Next, in order:
+1. **Shim → XNU loader**: port ios-sweet `shim/loader.c` + `tools/mkpayload.py` to LK boot.img v0
+   (payload in ramdisk @0x81000000), keep console/log/eMMC.
+2. **XNU (fork tarodib/ios-mido, CI on macOS runners)**:
+   a. 4 KB pages (A53 has no 16K granule) — check UniXNU / Redmi Note 12 port for the pmap changes.
+   b. GICv2 interrupt controller driver (ios-sweet is GICv3-only), vtimer INTID 20.
+   c. EL0 undefined-instruction emulator for LSE atomics (+ FP16 later).
+   d. eMMC root device driver using the sequence above (replaces UFS patches 0028/0030/0034/0069).
+   e. mido ADT via tools/mkadt.py from hw/mido.dtb; framebuffer 1080×1920 BGR888 @0x90001000.
+3. iOS root image from iPhone 8 (iPhone10,4) 16.7.16 → userdata (needs full IPSW, ~6 GB, + mkiosroot.sh).
+
+## HANDOFF — where to pick up (older)
+- Next: fix self-reboot-to-fastboot (try PMIC PON SOFT_RB_SPARE via SPMI, as Linux
+  `qpnp-power-on` does on 8953), then add an on-screen text console (port ios-sweet
+  `shim/console.c` to BGR888) and a pstore-RAM log at 0x9FF00000.
+- Then M2 prep: GICv2 + timer IRQ test in the shim, PSCI CPU_ON for cpus 1–7,
+  check ID_AA64MMFR0 TGran16 (expect 0 = no 16K) to confirm 4K-page XNU is required.
+- Blocked on user: WSL (`wsl --install -d Ubuntu-24.04` in admin PowerShell + reboot),
+  later `gh auth login`.
+
+### Bring-up milestones
+- [ ] M1 shim runs: screen goes a solid colour via `fastboot boot`
+- [ ] M2 XNU prints to framebuffer, reaches "waiting for root device"
+- [ ] M3 eMMC driver mounts HFS+ root, launchd starts, Apple logo
+- [ ] M4 lock screen (MobileGestalt identity, daemons disabled)
+- [ ] M5 touch + buttons

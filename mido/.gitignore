@@ -1,0 +1,11 @@
+# Build output, local toolchain, device dumps, backups and Apple firmware never go in git.
+shim/out/
+toolchain/
+backup/
+hw/
+upstream/
+*.img
+*.bin
+*.ipsw
+*.dmg
+dyld_shared_cache*

@@ -192,6 +192,17 @@ NOT backed up: userdata (personal data — user to save it).
 - XNU RAM window chosen: **0xA0000000, 1.5 GB** (above every carve-out incl. pstore 0x9FF00000;
   DRAM ends at 0x100000000). Ramdisk/payload staging area stays below 0x84A00000.
 
+### Loader step 2: full XNU loader (`shim/loader.c`, from ios-sweet loader.c, MIT)
+- Copies payload segments to phys_base + (vmaddr − virt_base), ADT then boot_args (16K-aligned)
+  behind the kernel, boot_args.Video = 0x90001000 / 4320 / 1080×1920 / depth 32, jumps MMU-off with
+  x0 = boot_args PA. Only runs when the 32 bpp switch succeeded.
+- Refuses (returns a reason, shim resets normally) if: no /chosen initrd, no SWEETXNU magic, bad
+  header, **0 segments or 0-byte ADT**, RAM window ≠ 0xA0000000.., ramdisk overlaps kernel RAM,
+  any segment outside the window. Log is flushed to `cache` before the attempt and again after a
+  refusal.
+- Test with the 4 MB header-only payload: `NOT BOOTED: PAYLOAD HAS NO KERNEL (HEADER-ONLY TEST)`,
+  back in fastboot at 37 s, logged. runshim.ps1 timing decode re-centred on 6.5 s overhead.
+
 ### XNU CI
 - `macos-14` runner retired → baseline run 42146912294 failed at job start.
 - Workflow on branch `mido` takes a `runner` input (default macos-15) and lists installed Xcodes
@@ -199,6 +210,45 @@ NOT backed up: userdata (personal data — user to save it).
 - Baseline SWEET build on macos-15: run 42147239678 (in progress). Goal: buildtree.tgz (fully
   patched xnu-8796 tree) to write the MIDO patches (4K pages, GICv2, LSE emu, eMMC) as real diffs.
   Known risk: Xcode 16 iig emits IORPC.kernelContent, missing in xnu-8796 → compat patch if needed.
+
+### Baseline XNU build + MIDO patch
+- Run 42147239678 (macos-15, unmodified SWEET): **success**. Artifacts in `xnu/kernel-baseline/`
+  (kernel.development.sweet 17 MB) and `xnu/buildtree-baseline/buildtree.tgz` (patched source, 23 MB).
+  Xcode 16 iig did NOT break the build (no IORPC compat patch needed so far).
+- Survey of the patched tree (`tools/wsl-xnu-survey.sh`):
+  - `__ARM_16K_PG__`: 47 sites in ~10 files; proc_reg.h has ARM_PGSHIFT 12 path, pmap has ARM_4K_TT_* → 4K is a supported mode.
+  - GICv3 use is confined to pe_fiq.c (init), sleh.c:1864-1891 (IAR/EOIR), SweetCPU.cpp:226 (SGI1R).
+  - start.s/sweet_early.c/arm_vm_init.c hard-code sweet's fb 0x9c000000 / 2400 rows / one 32 MB L2 block.
+- `mido/xnu/mido_xnu.py` (exact-string, count-checked edits) + `mido/xnu/mkpatch.sh` →
+  `xnu/patches/0100-mido-board.patch` (9 files, +248/-6), `git apply --check` OK on the baseline.
+  MIDO switch in SWEET.h: no 16K pages, HAS_GIC_V2 (new pe_fiq.c path + mido_gic_ack/eoi/send_sgi),
+  vtimer 20, -march=armv8-a+crc+crypto, fb 0x90001000 (stage-0 band, 4×2 MB bootstrap blocks,
+  early console, non-fatal 4-block KVA alias).
+- Commit 031a768 on `mido`; first MIDO kernel build: run 42149040200 → **failed, one error**:
+  `pmap.c:10988 static_assert((_COMM_PAGE64_BASE_ADDRESS & ~ARM_TT_L1_OFFMASK) >= MACH_VM_MAX_ADDRESS)`.
+  With 4K pages the commpage must be nested above all user VA at L1 (1 GB) granularity; the
+  build is a macOS-platform kernel (XNU_PLATFORM_MacOSX → MACH_VM_MAX 0x7FFFFE000000). The 16K
+  path explicitly exempts macOS (commpage inside a VM-reserved region). Everything else compiled
+  (make -k reported nothing else), incl. the GICv2 pe_fiq.c path, sleh.c, SweetCPU.cpp, start.s.
+  Log saved: `xnu/ci-42149040200.log`.
+- Fix (commit 50bc312): `-DMIDO_4K_VM` in MACHINE_FLAGS selects the **iOS** value
+  MACH_VM_MAX_ADDRESS = 0xFC0000000 (= 0xFFFFFC000 & ~(1 GB−1)); the userland is iOS anyway.
+  Build #2: run 42150230384.
+- `mido/tools/mkadt_mido.py` → `xnu/adt/mido.adt` (9.9 KB): RAM 0xA0000000 + 1.5 GB (− 1 MB /pram
+  panic log), GICv2 reg + vtimer 20, 8× A53 (reg = MPIDR), sweet-fbcon 0x90001000 1080×1920×4320,
+  identity **iPhone 8 Plus (D211AP, iPhone10,5)**: same 1080×1920 physical panel, A11 userland.
+  /product (from Apple's D211AP DeviceTree) not included yet — only needed for userland.
+
+### FIRST XNU BOOT ATTEMPT (build #2)
+- Run 42150230384: **MIDO kernel compiled** (4K pages, GICv2, ARMv8.0, iOS VA layout).
+  `xnu/kernel-mido-2/kernel.development.sweet`, plain arm64 (cputype 0x100000c), 0 chained fixups.
+- `repo/tools/mkpayload.py kernel mido.adt payload-mido-2.bin --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -v"`:
+  16.2 MB, virt_base 0xfffffe0006000000 (→ PA 0xA0000000), entry 0xfffffe0007427488,
+  kernel_end 0xfffffe0008464000 (→ PA 0xA2464000), 10 segments.
+- shim-boot.img 16.5 MB (fastboot max-download-size 0x20000000 = 512 MB).
+- `fastboot boot` → phone did **not** return to fastboot within 120 s → shim jumped to XNU
+  (the reset path only runs on refusal). Screen state = XNU's progress. Awaiting the user's photo,
+  then Power+Vol-Down to fastboot and pull the pre-jump log from `cache`.
 
 ### Userland ISA check — iPhone 8 (iPhone10,4) iOS 16.7.16 (20H392) dyld cache
 - Fetched only the dyld cache from Apple (`tools/fetch-dyld.sh`, ipsw remote extract) → WSL `~/fw/iPhone10,4/`.

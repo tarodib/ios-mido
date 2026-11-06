@@ -92,6 +92,29 @@ edit('makedefs/MakeInc.def',
      '# MIDO_4K_VM: iOS user VA layout with 4K pages (see osfmk/mach/arm/vm_param.h).\n'
      'MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DMIDO_4K_VM   -march=armv8-a+crc+crypto\n')
 
+# First boot on the phone (build #2): XNU drew its stage-0 band, then hung
+# silently at the first kernel-VA access after the MMU came on. With 4K pages
+# T1SZ_BOOT is 25 (39-bit TTBR1: only 0xffffff80_0000_0000 and up translate),
+# but ARM_LARGE_MEMORY (forced for every MacOSX-platform build) links the
+# kernel at 0xfffffe00_0700_4000 (-2 TB), which TTBR1 cannot reach. Use the
+# classic iOS layout (link 0xfffffff0_0700_4000) for the SWEET/MIDO config.
+edit('makedefs/MakeInc.def',
+     '# Use ARM_LARGE_MEMORY config for all MacOSX targets.\n'
+     'ifneq ($(filter $(PLATFORM),MacOSX),)\n'
+     'LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1\n'
+     'ARM64_PLKSEG_ADDR  =0xfffffe0004004000\n'
+     'ARM64_LINK_ADDR    =0xfffffe0007004000\n'
+     'endif\n',
+     '# Use ARM_LARGE_MEMORY config for all MacOSX targets.\n'
+     '# MIDO (4K pages, 39-bit kernel VA) cannot map the -2 TB layout: keep the iOS one.\n'
+     'ifneq ($(filter $(PLATFORM),MacOSX),)\n'
+     'ifneq ($(CURRENT_MACHINE_CONFIG),SWEET)\n'
+     'LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1\n'
+     'ARM64_PLKSEG_ADDR  =0xfffffe0004004000\n'
+     'ARM64_LINK_ADDR    =0xfffffe0007004000\n'
+     'endif\n'
+     'endif\n')
+
 # ---------------------------------------------------------------- vm_param.h
 # CI run 42149040200: pmap.c static_assert (4K only) requires the commpage
 # (0xFFFFFC000) to be nested above MACH_VM_MAX_ADDRESS at L1 (1 GB) granularity.

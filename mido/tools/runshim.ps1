@@ -21,6 +21,7 @@ $codes = 'ok','bus power stays off','card never reached TRAN','LBA0 read/sig bad
          '(15 unused)','CMD1: controller busy','CMD1: cmd timeout (no response)','CMD1: cmd CRC/index error',
          'CMD1: data timeout','CMD1: data error','GCC CFG sanity fail','GCC RCG update never latched'
 $holdBase = 30   # must match HOLD_BASE in shim/shim.c
-$code = [Math]::Round(($el - 5 - $holdBase) / 4)
+# Measured overhead (LK + reset + log flushes) is ~6.5 s; codes are 4 s apart, so +-2 s margin.
+$code = [Math]::Round(($el - 6.5 - $holdBase) / 4)
 "back in fastboot after {0:N1} s -> eMMC code ~{1} ({2})" -f $el, $code, $codes[[Math]::Max(0,[Math]::Min(22,$code))]
 if (-not $NoLog) { & "$root\tools\shimlog.ps1" }

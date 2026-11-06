@@ -12,6 +12,7 @@
 #include "sdhc.h"
 #include "spmi.h"
 #include "fdt.h"
+#include "loader.h"
 
 #define IMEM_RESTART_REASON 0x0860065cUL
 #define RESTART_BOOTLOADER  0x77665500U
@@ -417,6 +418,12 @@ void shim_main(uint64_t dtb)
 	test_emmc();
 	con_putc('\n');
 	flush_log();
+	if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
+		con_puts("\nLOADER:\n");
+		const char *why = loader_boot(dtb);   /* returns only if it does not boot */
+		con_puts(" NOT BOOTED: "); con_puts(why); con_putc('\n');
+		flush_log();     /* keep the refusal reason in the cache log too */
+	}
 	con_puts("EMMC CODE "); con_dec(emmc_code);
 	/* HOLD_BASE gives a person time to read the screen; runshim.ps1 subtracts it. */
 #define HOLD_BASE 30

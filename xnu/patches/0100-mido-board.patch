@@ -1147,7 +1147,7 @@ index 6928957..53b7988 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
-index bec97fb..12c205e 100644
+index bec97fb..9a6bc33 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
 @@ -218,9 +218,67 @@ extern int serverperfmode;
@@ -1229,13 +1229,21 @@ index bec97fb..12c205e 100644
  	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
  	    startup_phase >= STARTUP_SUB_KPRINTF) {
  		kprintf("kernel_bootstrap_thread: %s\n", message);
-@@ -623,6 +685,15 @@ kernel_bootstrap_thread(void)
+@@ -623,6 +685,23 @@ kernel_bootstrap_thread(void)
  	 * Thread callout service.
  	 */
  	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
 +#if defined(MIDO_BOARD)
 +	{
 +		uint64_t deadline;
++		uint32_t mute = 0;
++		/* mido_mute=1: stop drawing console text from here on (it still goes to the
++		 * persistent log; panics draw). sweetfb_noconsole only mutes at the first GUI swap. */
++		if (PE_parse_boot_argn("mido_mute", &mute, sizeof(mute)) && mute) {
++			extern int sweet_console_muted;
++			printf("MIDO: console muted (mido_mute=1); see the persistent log\n");
++			sweet_console_muted = 1;
++		}
 +		mido_boot_thread = current_thread();
 +		mido_tick_call = thread_call_allocate(mido_tick, NULL);
 +		clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
@@ -1245,7 +1253,7 @@ index bec97fb..12c205e 100644
  
  	/*
  	 * Remain on current processor as
-@@ -771,6 +842,9 @@ kernel_bootstrap_thread(void)
+@@ -771,6 +850,9 @@ kernel_bootstrap_thread(void)
  #ifdef  IOKIT
  	kernel_bootstrap_log("PE_lockdown_iokit");
  	PE_lockdown_iokit();
@@ -1255,7 +1263,7 @@ index bec97fb..12c205e 100644
  #endif
  	/*
  	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
-@@ -786,6 +860,9 @@ kernel_bootstrap_thread(void)
+@@ -786,6 +868,9 @@ kernel_bootstrap_thread(void)
  	/*
  	 *	Start the user bootstrap.
  	 */

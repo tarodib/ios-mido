@@ -925,3 +925,14 @@ on the phone. What it took after stage 2 (in order of discovery):
   still exact (triangle 20808 / clear 44728 / other 0).
 - 510-650 MHz need GPLL3 and higher CX levels: later. DDR/bus votes not done yet.
 - Next: step 4, the EAGL replacement so backboardd/CoreAnimation renders through Mesa.
+
+### GPU step 4a: our library runs inside backboardd (2026-11-08)
+- Kernel: boot-arg midoenv=NAME:VAR=VALUE (kern_exec), AMFI policy renamed "AMFI" with op 0x5a
+  (amfi_check_dyld_policy_self -> flags 0x7b); without it dyld silently drops DYLD_INSERT_LIBRARIES.
+- midogl.dylib pushed into the 64 MiB placeholder /usr/local/bin/midogl-test; shim-boot-gpu7.img.
+- Log: "inject: loaded in backboardd, pid 56"; EAGLContext and CAContext present;
+  MTLCreateSystemDefaultDevice -> NULL (no Metal device, so CoreAnimation must use GLES);
+  "screen: FD506 / freedreno"; "GL inside backboardd: OpenGL ES 3.1 Mesa 25.3.6".
+  backboardd started once (no crash loop) and iOS reached the lock screen.
+- Next: 4b, EAGLContext interception + GLI dispatch table for CoreAnimation; 4c IOSurface <-> GPU
+  buffers; 4d direct display.

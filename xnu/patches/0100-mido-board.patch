@@ -13,10 +13,10 @@ index 6630131..5b98298 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_gpu.c b/bsd/dev/mido_gpu.c
 new file mode 100644
-index 0000000..3ac8b0b
+index 0000000..cb07f6f
 --- /dev/null
 +++ b/bsd/dev/mido_gpu.c
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,653 @@
 +/*
 + * mido (Redmi Note 4, MSM8953) Adreno 506 bring-up inside XNU, step 1 of GPU acceleration.
 + *
@@ -383,6 +383,8 @@ index 0000000..3ac8b0b
 +
 +static int blit_test(void)
 +{
++	wr(W(O_SCRATCH), 0);                                /* the completion marker of an earlier run */
++	dsb();
 +	for (uint32_t y = 0; y < 256; y++) {
 +		for (uint32_t x = 0; x < 256; x++) {
 +			wr(W(O_SRC) + y * 1024 + x * 4, (x << 16) | (y << 8) | 0xc0u);

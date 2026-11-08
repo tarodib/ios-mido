@@ -62,5 +62,29 @@ for lib in src/mesa/libmesa.a src/gallium/drivers/freedreno/libfreedreno.a     s
 done
 
 find mesa-build -name '*.a' | sort
+
+# ---- midogl: the bridge, the context layer and the GLES triangle test ----
+M=$work/mesa; B=$work/mesa-build
+python3 -I - "$B/compile_commands.json" > mesa-defines.rsp <<'PY'
+import json, shlex, sys
+cc = json.load(open(sys.argv[1]))
+e = [x for x in cc if x["file"].endswith("state_tracker/st_manager.c")][0]
+print("\n".join(shlex.quote(a) for a in shlex.split(e["command"]) if a.startswith("-D")))
+PY
+IOSCC="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
+INC="-I$here -I$here/include -I$M/include -I$M/src -I$M/src/mesa -I$M/src/gallium/include -I$M/src/gallium/auxiliary -I$M/src/gallium/drivers -I$M/src/gallium/winsys -I$B/src -I$B/src/mesa"
+mkdir -p out
+for f in midogl midogl_drm midogl-test; do
+	$IOSCC -O2 -Wall @mesa-defines.rsp $INC -c "$here/$f.c" -o "out/$f.o"
+done
+LIBS=$(find mesa-build -name '*.a' | grep -v -E 'libxml2|libarchive|libvulkan|ir2|xmllint')
+xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dead_strip \
+	-o out/midogl-test out/midogl-test.o out/midogl.o out/midogl_drm.o \
+xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dead_strip \
+	-o out/midogl-test out/midogl-test.o out/midogl.o out/midogl_drm.o \
+	$LIBS $LIBS -framework IOKit -framework CoreFoundation -lc++ -lz
+codesign -f -s - out/midogl-test
+ls -la out/midogl-test
+cp out/midogl-test "$(dirname "$out")/midogl-test"
 tar -czf "$out" -C "$work" $(cd "$work" && find mesa-build -name '*.a')
 ls -la "$out"

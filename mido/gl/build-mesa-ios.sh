@@ -77,12 +77,10 @@ mkdir -p out
 for f in midogl midogl_drm midogl-test; do
 	$IOSCC -O2 -Wall @mesa-defines.rsp $INC -c "$here/$f.c" -o "out/$f.o"
 done
-LIBS=$(find mesa-build -name '*.a' | grep -v -E 'libxml2|libarchive|libvulkan|ir2|xmllint')
+LIBS=$(find mesa-build -name '*.a' | grep -v -E 'libxml2|libarchive|xmllint')
 xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dead_strip \
 	-o out/midogl-test out/midogl-test.o out/midogl.o out/midogl_drm.o \
-xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dead_strip \
-	-o out/midogl-test out/midogl-test.o out/midogl.o out/midogl_drm.o \
-	$LIBS $LIBS -framework IOKit -framework CoreFoundation -lc++ -lz
+	$LIBS -framework IOKit -framework CoreFoundation -lc++ -lz
 codesign -f -s - out/midogl-test
 ls -la out/midogl-test
 cp out/midogl-test "$(dirname "$out")/midogl-test"

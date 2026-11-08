@@ -3,6 +3,7 @@
  * pair, draws one triangle into a 256x256 texture, reads the pixels back. Reports in
  * the kernel log ("MIDO GPU USER: midogl-test: ...").
  */
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,10 +44,14 @@ int
 main(void)
 {
 	sleep(5);
-	memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0);
+	int r6 = memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0);
+	int e6 = errno;
+	int r5 = memorystatus_control(5 /* SET_JETSAM_HIGH_WATER_MARK */, getpid(), 1024, NULL, 0);
+	int e5 = errno;
 	if (!midogl_init()) {
 		return 1;
 	}
+	midogl_log("memory limit calls: task %d errno %d, hwm %d errno %d, uid %d", r6, e6, r5, e5, getuid());
 	struct midogl_ctx *c = midogl_create(2, 0);
 	if (!c || !midogl_make_current(c)) {
 		midogl_log("no context");

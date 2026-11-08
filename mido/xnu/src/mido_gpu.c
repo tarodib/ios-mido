@@ -364,6 +364,8 @@ static int cp_start(void)
 
 static int blit_test(void)
 {
+	wr(W(O_SCRATCH), 0);                                /* the completion marker of an earlier run */
+	dsb();
 	for (uint32_t y = 0; y < 256; y++) {
 		for (uint32_t x = 0; x < 256; x++) {
 			wr(W(O_SRC) + y * 1024 + x * 4, (x << 16) | (y << 8) | 0xc0u);

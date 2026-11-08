@@ -44,6 +44,15 @@ renderonly_create_gpu_import_for_resource(struct pipe_resource *r, struct render
 	return NULL;
 }
 
+/* The state tracker asks this unconditionally; 0 = no quirks. */
+static int
+fs_get_param(struct pipe_frontend_screen *fs, enum st_manager_param param)
+{
+	(void)fs;
+	(void)param;
+	return 0;
+}
+
 static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct pipe_frontend_screen *fscreen;
 static driOptionCache opt_info, opts;
@@ -67,6 +76,7 @@ midogl_init(void)
 			} else {
 				fscreen = calloc(1, sizeof(*fscreen));
 				fscreen->screen = screen;
+				fscreen->get_param = fs_get_param;
 				midogl_log("screen: %s / %s", screen->get_name(screen), screen->get_vendor(screen));
 			}
 		}

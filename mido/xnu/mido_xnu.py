@@ -1727,6 +1727,55 @@ edit('iokit/KernelConfigTables.cpp',
      "    \"   },\"\n"
      '#endif\n')
 
+# ---------------------------------------------------------------------------
+# GPU step 4: midoenv=NAME:VAR=VALUE adds one environment variable to every exec of
+# program NAME (DYLD_INSERT_LIBRARIES for backboardd, without editing launchd.plist).
+# ---------------------------------------------------------------------------
+edit('bsd/kern/kern_exec.c',
+     '__attribute__((noinline))\nstatic int\nexec_extract_strings(struct image_params *imgp)\n{\n',
+     '#if defined(MIDO_BOARD)\n'
+     'static int\n'
+     'mido_exec_env(struct image_params *imgp, int ptr_size)\n'
+     '{\n'
+     '\tstatic char spec[256];\n'
+     '\tstatic int state;        /* 0 not parsed, 1 no boot-arg, 2 parsed */\n'
+     '\tif (state == 0) {\n'
+     '\t\tstate = (PE_parse_boot_argn("midoenv", spec, sizeof(spec)) && spec[0]) ? 2 : 1;\n'
+     '\t}\n'
+     '\tif (state != 2) {\n'
+     '\t\treturn 0;\n'
+     '\t}\n'
+     '\tconst char *sep = strchr(spec, \':\');\n'
+     '\tconst char *path = imgp->ip_strings + strlen("executable_path=");\n'
+     '\tconst char *base = strrchr(path, \'/\');\n'
+     '\tbase = base ? base + 1 : path;\n'
+     '\tif (sep == NULL || strlen(base) != (size_t)(sep - spec) || strncmp(base, spec, sep - spec) != 0) {\n'
+     '\t\treturn 0;\n'
+     '\t}\n'
+     '\tint error = exec_add_user_string(imgp, CAST_USER_ADDR_T(sep + 1), UIO_SYSSPACE, TRUE);\n'
+     '\tif (error) {\n'
+     '\t\treturn error;\n'
+     '\t}\n'
+     '\tif (imgp->ip_argspace < ptr_size) {\n'
+     '\t\treturn E2BIG;\n'
+     '\t}\n'
+     '\timgp->ip_argspace -= ptr_size;\n'
+     '\timgp->ip_envc++;\n'
+     '\tprintf("MIDO ENV: %s += %s\\n", base, sep + 1);\n'
+     '\treturn 0;\n'
+     '}\n'
+     '#endif\n\n'
+     '__attribute__((noinline))\nstatic int\nexec_extract_strings(struct image_params *imgp)\n{\n')
+edit('bsd/kern/kern_exec.c',
+     '\t/* Save space for envv[] NULL terminator */\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\terror = mido_exec_env(imgp, new_ptr_size);\n'
+     '\tif (error) {\n'
+     '\t\tgoto bad;\n'
+     '\t}\n'
+     '#endif\n\n'
+     '\t/* Save space for envv[] NULL terminator */\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

@@ -35,5 +35,6 @@ jobs:
           path: |
             mesa-ios-libs.tgz
             midogl-test
+            midogl.dylib
             mesa-work/mesa-build/meson-logs/meson-log.txt
           if-no-files-found: warn

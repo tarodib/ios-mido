@@ -1527,6 +1527,64 @@ index bb2a2bf..3ce66f1 100644
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
  #else
  #define bsd_init_kprintf(x, ...)
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 68612db..9e51ebe 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5568,6 +5568,39 @@ bad:
+  * Note:	The argument and environment vectors are user space pointers
+  *		to arrays of user space pointers.
+  */
++#if defined(MIDO_BOARD)
++static int
++mido_exec_env(struct image_params *imgp, int ptr_size)
++{
++	static char spec[256];
++	static int state;        /* 0 not parsed, 1 no boot-arg, 2 parsed */
++	if (state == 0) {
++		state = (PE_parse_boot_argn("midoenv", spec, sizeof(spec)) && spec[0]) ? 2 : 1;
++	}
++	if (state != 2) {
++		return 0;
++	}
++	const char *sep = strchr(spec, ':');
++	const char *path = imgp->ip_strings + strlen("executable_path=");
++	const char *base = strrchr(path, '/');
++	base = base ? base + 1 : path;
++	if (sep == NULL || strlen(base) != (size_t)(sep - spec) || strncmp(base, spec, sep - spec) != 0) {
++		return 0;
++	}
++	int error = exec_add_user_string(imgp, CAST_USER_ADDR_T(sep + 1), UIO_SYSSPACE, TRUE);
++	if (error) {
++		return error;
++	}
++	if (imgp->ip_argspace < ptr_size) {
++		return E2BIG;
++	}
++	imgp->ip_argspace -= ptr_size;
++	imgp->ip_envc++;
++	printf("MIDO ENV: %s += %s\n", base, sep + 1);
++	return 0;
++}
++#endif
++
+ __attribute__((noinline))
+ static int
+ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5774,13 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(MIDO_BOARD)
++	error = mido_exec_env(imgp, new_ptr_size);
++	if (error) {
++		goto bad;
++	}
++#endif
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
 diff --git a/iokit/Kernel/arm/MidoGPU.cpp b/iokit/Kernel/arm/MidoGPU.cpp
 new file mode 100644
 index 0000000..8905165

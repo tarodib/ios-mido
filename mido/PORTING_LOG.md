@@ -900,3 +900,19 @@ on the phone. What it took after stage 2 (in order of discovery):
 - Next: mido/gl/{mesa-ios.sh, include/xf86drm.h, mesa.patch} + a CI job that builds the
   Mesa static libs for iOS; then midogl + a GLES triangle test via midogpu-style job.
 - Pending check: second boot of shim-boot-gpu2.img should reach the lock screen.
+
+### GPU step 3: OpenGL ES triangle through Mesa freedreno on iOS (2026-11-08)
+- Mesa 25.3.6 cross-built for iOS in CI (.github/workflows/mesa-ios.yml, mido/gl/build-mesa-ios.sh,
+  mesa.patch: build src/freedreno/drm on darwin, BO map through midogl, no ELF build-id, sysctl
+  for RAM), with static libraries for gallium freedreno + GLES, no EGL/GLX/LLVM.
+- mido/gl/midogl_drm.c: libdrm/MSM emulation on MidoGPU ("msm" 1.7, softpin); midogl.c: screen
+  and surfaceless contexts (st_api_create_context; frontend get_param is mandatory).
+- Boot shim-boot-gpu3.img + root rootimg/ios16-root-gl.simg (64 MiB placeholder
+  /usr/local/bin/midogl-test, extents rootimg/gl-extents.txt, updated in place with
+  tools/gl-push.ps1 from OrangeFox in ~3 s; md5 verified).
+- Log: "GL: OpenGL ES 3.1 Mesa 25.3.6 | FD506 | freedreno", shaders linked, draw GL error 0,
+  center ff8000ff, corner 0000ffff, triangle 20808 / clear 44728 / other 0 ->
+  "OPENGL ES TRIANGLE DRAWN BY THE GPU".
+- Daemons have a small jetsam limit (GLSL builtins killed the test, reason 7):
+  memorystatus_control(7 SET_MEMLIMIT_PROPERTIES); commands 5/6 return EINVAL on this kernel.
+- GPU still at 19.2 MHz. Next: GPU clocks, then step 4: backboardd + EAGL replacement + GPU present.

@@ -23,6 +23,8 @@ probe_thread(void *arg)
 {
 	(void)arg;
 	sleep(20);
+	midogl_open();                         /* the log goes through the GPU connection */
+	midogl_log("inject: loaded in %s, pid %d", getprogname(), getpid());
 	void *(*mtl)(void) = dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
 	midogl_log("inject: %s: EAGLContext %p, CAContext %p, MTLCreateSystemDefaultDevice %p -> %p",
 	    getprogname(), (void *)objc_getClass("EAGLContext"), (void *)objc_getClass("CAContext"),

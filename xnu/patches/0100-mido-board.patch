@@ -1585,6 +1585,50 @@ index 68612db..9e51ebe 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..7c13962 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -305,8 +305,27 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 	}
+ }
+ 
++#if defined(MIDO_BOARD)
++static int
++mido_amfi_syscall(__unused struct proc *p, int call, user_addr_t arg)
++{
++	uint64_t a[2], flags = 0x7bull;
++
++	if (call != 0x5a) {
++		return ENOPOLICY;
++	}
++	if (copyin(arg, a, sizeof(a)) != 0 || a[1] == 0) {
++		return EFAULT;
++	}
++	return copyout(&flags, (user_addr_t)a[1], sizeof(flags));
++}
++#endif
++
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++#if defined(MIDO_BOARD)
++	.mpo_policy_syscall = mido_amfi_syscall,
++#endif
+ };
+ 
+ /*
+@@ -360,7 +379,11 @@ static struct mac_policy_conf sweet_sandbox_mac_conf = {
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
++#if defined(MIDO_BOARD)
++	.mpc_name = "AMFI",             /* __mac_syscall("AMFI", ...) finds it by name */
++#else
+ 	.mpc_name = "SWEET AMFI",
++#endif
+ 	.mpc_fullname = "SWEET built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };
 diff --git a/iokit/Kernel/arm/MidoGPU.cpp b/iokit/Kernel/arm/MidoGPU.cpp
 new file mode 100644
 index 0000000..8905165

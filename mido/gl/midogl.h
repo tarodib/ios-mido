@@ -3,6 +3,7 @@
 
 struct midogl_ctx;
 
+int midogl_open(void);
 bool midogl_init(void);
 struct midogl_ctx *midogl_create(int major, int minor);
 bool midogl_make_current(struct midogl_ctx *c);

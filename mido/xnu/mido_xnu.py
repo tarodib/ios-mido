@@ -1776,6 +1776,41 @@ edit('bsd/kern/kern_exec.c',
      '#endif\n\n'
      '\t/* Save space for envv[] NULL terminator */\n')
 
+# dyld asks policy "AMFI" (op 0x5a, amfi_check_dyld_policy_self: arg -> {u64 in; u64 *out})
+# which DYLD_* variables to honour, and honours none if the call fails. Allow path and
+# insertion variables, and let a failed insertion continue instead of killing the process.
+AMFI = 'bsd/kern/sweet_amfi.c'
+edit(AMFI,
+     'static const struct mac_policy_ops sweet_amfi_mac_ops = {\n'
+     '\t.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,\n',
+     '#if defined(MIDO_BOARD)\n'
+     'static int\n'
+     'mido_amfi_syscall(__unused struct proc *p, int call, user_addr_t arg)\n'
+     '{\n'
+     '\tuint64_t a[2], flags = 0x7bull;\n'
+     '\n'
+     '\tif (call != 0x5a) {\n'
+     '\t\treturn ENOPOLICY;\n'
+     '\t}\n'
+     '\tif (copyin(arg, a, sizeof(a)) != 0 || a[1] == 0) {\n'
+     '\t\treturn EFAULT;\n'
+     '\t}\n'
+     '\treturn copyout(&flags, (user_addr_t)a[1], sizeof(flags));\n'
+     '}\n'
+     '#endif\n\n'
+     'static const struct mac_policy_ops sweet_amfi_mac_ops = {\n'
+     '\t.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\t.mpo_policy_syscall = mido_amfi_syscall,\n'
+     '#endif\n')
+edit(AMFI,
+     '\t.mpc_name = "SWEET AMFI",\n',
+     '#if defined(MIDO_BOARD)\n'
+     '\t.mpc_name = "AMFI",             /* __mac_syscall("AMFI", ...) finds it by name */\n'
+     '#else\n'
+     '\t.mpc_name = "SWEET AMFI",\n'
+     '#endif\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

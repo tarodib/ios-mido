@@ -54,7 +54,11 @@ meson setup mesa-build mesa --cross-file ios-cross.txt \
 	-Dbuild-tests=false -Dshader-cache=disabled -Dperfetto=false \
 	-Dgallium-va=disabled -Dgallium-rusticl=false -Dtools= \
 	-Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false
-ninja -C mesa-build -k 0
+# -k 0: unrelated subproject tools (xmllint) may fail; the libraries are checked below.
+ninja -C mesa-build -k 0 || true
+for lib in src/mesa/libmesa.a src/gallium/drivers/freedreno/libfreedreno.a     src/freedreno/ir3/libfreedreno_ir3.a src/freedreno/drm/libfreedreno_drm.a     src/gallium/winsys/freedreno/drm/libfreedrenowinsys.a; do
+	[ -f "mesa-build/$lib" ] || { echo "MISSING $lib"; exit 1; }
+done
 
 find mesa-build -name '*.a' | sort
 tar -czf "$out" -C "$work" $(cd "$work" && find mesa-build -name '*.a')

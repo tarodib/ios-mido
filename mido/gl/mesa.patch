@@ -18,6 +18,21 @@ index 1f99f36..6eb643d 100644
  simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
  simple_mtx_t fence_lock = SIMPLE_MTX_INITIALIZER;
  
+diff --git a/src/freedreno/ir3/ir3_disk_cache.c b/src/freedreno/ir3/ir3_disk_cache.c
+index 4596772..fcee97b 100644
+--- a/src/freedreno/ir3/ir3_disk_cache.c
++++ b/src/freedreno/ir3/ir3_disk_cache.c
+@@ -33,6 +33,10 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
+    if (ir3_shader_debug & IR3_DBG_NOCACHE)
+       return;
+ 
++#ifdef __APPLE__
++   return;   /* no ELF build-id; the iOS build has the shader cache disabled */
++#endif
++
+    const char *renderer = fd_dev_name(compiler->dev_id);
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(ir3_disk_cache_init);
 diff --git a/src/freedreno/meson.build b/src/freedreno/meson.build
 index 29e1bc4..29e780d 100644
 --- a/src/freedreno/meson.build
@@ -31,3 +46,36 @@ index 29e1bc4..29e780d 100644
    subdir('drm')
  endif
  
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 3d405aa..59c7fcb 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -25,7 +25,11 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include "drm-uapi/drm_fourcc.h"
++#ifdef __APPLE__
++#include <sys/sysctl.h>
++#else
+ #include <sys/sysinfo.h>
++#endif
+ 
+ #include "freedreno_fence.h"
+ #include "freedreno_perfetto.h"
+@@ -982,9 +986,16 @@ fd_screen_create(int fd,
+    if (driQueryOptionb(config->options, "disable_explicit_sync_heuristic"))
+       fd_device_disable_explicit_sync_heuristic(dev);
+ 
++#ifdef __APPLE__
++   uint64_t memsize = 0;
++   size_t memsize_len = sizeof(memsize);
++   sysctlbyname("hw.memsize", &memsize, &memsize_len, NULL, 0);
++   screen->ram_size = memsize;
++#else
+    struct sysinfo si;
+    sysinfo(&si);
+    screen->ram_size = si.totalram;
++#endif
+ 
+    DBG("Pipe Info:");
+    DBG(" GPU-id:          %s", fd_dev_name(screen->dev_id));

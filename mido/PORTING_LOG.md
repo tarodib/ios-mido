@@ -916,3 +916,12 @@ on the phone. What it took after stage 2 (in order of discovery):
 - Daemons have a small jetsam limit (GLSL builtins killed the test, reason 7):
   memorystatus_control(7 SET_MEMLIMIT_PROPERTIES); commands 5/6 return EINVAL on this kernel.
 - GPU still at 19.2 MHz. Next: GPU clocks, then step 4: backboardd + EAGL replacement + GPU present.
+
+### GPU clock: 400 MHz (2026-11-08)
+- Shim votes VDD_CX level 0x100 (RPM smpa 2 "vlvl"; 400 MHz needs 0xc0), XNU switches the gfx3d
+  RCG to GPLL0/2 after the XO self-test (boot-arg midogpuclk: 266/320/400, default 400).
+- shim-boot-gpu5.img: "clock set to 400 MHz, measured 404 MHz" (RBBM_PERFCTR_CP_0 over a 100 ms
+  delay, so the extra 1% is delay() overhead), 2D blit 65536/65536 at 400 MHz, OpenGL ES triangle
+  still exact (triangle 20808 / clear 44728 / other 0).
+- 510-650 MHz need GPLL3 and higher CX levels: later. DDR/bus votes not done yet.
+- Next: step 4, the EAGL replacement so backboardd/CoreAnimation renders through Mesa.

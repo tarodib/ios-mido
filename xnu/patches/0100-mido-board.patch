@@ -13,10 +13,10 @@ index 6630131..5b98298 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_gpu.c b/bsd/dev/mido_gpu.c
 new file mode 100644
-index 0000000..20d5721
+index 0000000..c681364
 --- /dev/null
 +++ b/bsd/dev/mido_gpu.c
-@@ -0,0 +1,598 @@
+@@ -0,0 +1,600 @@
 +/*
 + * mido (Redmi Note 4, MSM8953) Adreno 506 bring-up inside XNU, step 1 of GPU acceleration.
 + *
@@ -560,8 +560,10 @@ index 0000000..20d5721
 +		}
 +		delay(100);
 +	}
-+	printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
-+	    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
++	if (timeout_ms >= 1000) {                           /* Mesa polls with timeout 0 all the time */
++		printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
++		    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
++	}
 +	return -1;
 +}
 +

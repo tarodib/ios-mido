@@ -541,8 +541,10 @@ int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms)
 		}
 		delay(100);
 	}
-	printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
-	    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
+	if (timeout_ms >= 1000) {                           /* Mesa polls with timeout 0 all the time */
+		printf("MIDO GPU: fence %u timed out (at %u) RPTR %u WPTR %u HW_FAULT %08x\n",
+		    seq, rd(W(O_FENCE)), gr(0x0806), gr(0x0807), gr(0x0b1a));
+	}
 	return -1;
 }
 

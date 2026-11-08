@@ -74,15 +74,18 @@ PY
 IOSCC="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
 INC="-I$here -I$here/include -I$M/include -I$M/src -I$M/src/mesa -I$M/src/gallium/include -I$M/src/gallium/auxiliary -I$M/src/gallium/drivers -I$M/src/gallium/winsys -I$B/src -I$B/src/mesa"
 mkdir -p out
-for f in midogl midogl_drm midogl-test midogl-inject; do
+nm -g "$B/src/mesa/glapi/glapi/libglapi_bridge.a" > out/bridge.nm
+python3 -I "$here/gen-dispatch.py" "$here/ios-dispatch.txt" "$M/include" out/bridge.nm out/dispatch.c
+$IOSCC -O2 @mesa-defines.rsp $INC -c out/dispatch.c -o out/dispatch.o
+for f in midogl midogl_drm midogl-test midogl-inject eagl; do
 	$IOSCC -O2 -Wall @mesa-defines.rsp $INC -c "$here/$f.c" -o "out/$f.o"
 done
 LIBS=$(find mesa-build -name '*.a' | grep -v -E 'libxml2|libarchive|xmllint')
 xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dead_strip \
-	-o out/midogl-test out/midogl-test.o out/midogl.o out/midogl_drm.o \
-	$LIBS -framework IOKit -framework CoreFoundation -lc++ -lz
+	-o out/midogl-test out/midogl-test.o out/eagl.o out/dispatch.o out/midogl.o out/midogl_drm.o \
+	$LIBS -framework IOKit -framework CoreFoundation -framework IOSurface -framework OpenGLES -framework CoreGraphics -lobjc -lc++ -lz
 codesign -f -s - out/midogl-test
-xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dynamiclib -dead_strip 	-install_name /usr/local/bin/midogl-test -o out/midogl.dylib out/midogl-inject.o out/midogl.o out/midogl_drm.o 	$LIBS -framework IOKit -framework CoreFoundation -lobjc -lc++ -lz
+xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dynamiclib -dead_strip 	-install_name /usr/local/bin/midogl-test -o out/midogl.dylib out/midogl-inject.o out/eagl.o out/dispatch.o out/midogl.o out/midogl_drm.o 	$LIBS -framework IOKit -framework CoreFoundation -framework IOSurface -framework OpenGLES -framework CoreGraphics -lobjc -lc++ -lz
 codesign -f -s - out/midogl.dylib
 cp out/midogl.dylib "$(dirname "$out")/midogl.dylib"
 ls -la out/midogl.dylib

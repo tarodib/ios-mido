@@ -936,3 +936,15 @@ on the phone. What it took after stage 2 (in order of discovery):
   backboardd started once (no crash loop) and iOS reached the lock screen.
 - Next: 4b, EAGLContext interception + GLI dispatch table for CoreAnimation; 4c IOSurface <-> GPU
   buffers; 4d direct display.
+
+### GPU step 4b/4c: EAGL on Mesa, IOSurfaces in GPU memory (2026-11-08, not yet booted)
+- `mido/gl/eagl.c`, `eagl.h`, `gen-dispatch.py` and `ios-dispatch.txt` are adapted from
+  ios-sailfish by Joran Vancoillie (https://github.com/joranv1/ios-sailfish, tools/sweetgl),
+  used and published with the author's permission. So is the A5xx linear pitchalign rule in
+  `mesa.patch` and the sysmem/nofp16 settings.
+- Mido changes to it: names mapped onto midogl (`sweet_drm.h`, `sweetgl.h`); the hard-coded
+  QuartzCore addresses are probed before use and skipped on another build; plane offset is
+  taken from the surface base.
+- Kernel: IOSurfaces are allocated from the GPU pool (0x99400000-0x9ff00000, write-combined),
+  falling back to wired memory when it is full. MidoGPU selector 6 returns a surface's GPU
+  address and size. GPU thread delay reduced from 20 s to 3 s.

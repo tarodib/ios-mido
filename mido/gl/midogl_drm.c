@@ -41,13 +41,13 @@ extern kern_return_t IOConnectUnmapMemory64(io_connect_t c, uint32_t type, task_
 #define kIOMapAnywhere           0x00000001
 #define kIOMapWriteCombineCache  0x00000400
 
-#define MAX_BOS 4096
+#define MAX_BOS 8192          /* kernel handles below 4096, imported surfaces above */
 #define MGPU_PARAM_READY 3
 
 struct mbo {
 	uint64_t gpu, size, cpu;
 	uint32_t fence;                     /* last submit that used it */
-	int used;
+	int used;                           /* 1 = kernel buffer, 2 = imported IOSurface */
 };
 
 static io_connect_t conn;
@@ -161,8 +161,12 @@ gem_close(uint32_t handle)
 		return -EINVAL;
 	}
 	uint64_t cpu = b->cpu, h = handle - 1;
+	int imported = b->used == 2;
 	b->used = 0;
 	pthread_mutex_unlock(&lock);
+	if (imported) {
+		return 0;                       /* the IOSurface owns memory and mapping */
+	}
 	IOConnectUnmapMemory64(conn, (uint32_t)h, mach_task_self(), cpu);
 	uint32_t n = 0;
 	IOConnectCallScalarMethod(conn, 2, &h, 1, NULL, &n);
@@ -401,3 +405,26 @@ int drmSyncobjFDToHandle(int fd, int o, uint32_t *h) { (void)fd; (void)o; (void)
 int drmSyncobjReset(int fd, const uint32_t *h, uint32_t c) { (void)fd; (void)h; (void)c; return -ENOSYS; }
 int drmSyncobjImportSyncFile(int fd, uint32_t h, int s) { (void)fd; (void)h; (void)s; return -ENOSYS; }
 int drmSyncobjExportSyncFile(int fd, uint32_t h, int *s) { (void)fd; (void)h; (void)s; return -ENOSYS; }
+
+/* A GEM handle for an IOSurface in the GPU pool; map = its address in this process. */
+int
+sweet_drm_import_iosurface(uint32_t surface_id, uint64_t map, uint32_t *handle, uint64_t *size)
+{
+	uint64_t in = surface_id, out[2];
+	uint32_t n = 2;
+	if (!conn || IOConnectCallScalarMethod(conn, 6, &in, 1, out, &n)) {
+		return -ENOENT;
+	}
+	pthread_mutex_lock(&lock);
+	for (uint32_t i = 4096; i < MAX_BOS; i++) {
+		if (!bos[i].used) {
+			bos[i] = (struct mbo){ .gpu = out[0], .size = out[1], .cpu = map, .used = 2 };
+			pthread_mutex_unlock(&lock);
+			*handle = i + 1;
+			*size = out[1];
+			return 0;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return -ENOSPC;
+}

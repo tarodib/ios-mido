@@ -17,6 +17,7 @@
 #include "renderonly/renderonly.h"
 
 #include "midogl.h"
+#include "sweetgl.h"
 
 void midogl_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int midogl_open(void);
@@ -67,7 +68,8 @@ midogl_init(void)
 			midogl_log("no MidoGPU service");
 		} else {
 			/* Direct rendering to memory: no GMEM tile resolve past surface ends. */
-			setenv("FD_MESA_DEBUG", "sysmem", 0);
+			setenv("FD_MESA_DEBUG", "sysmem,nofp16", 0);
+			setenv("IR3_SHADER_DEBUG", "nofp16", 0);
 			driParseOptionInfo(&opt_info, midogl_driconf, ARRAY_SIZE(midogl_driconf));
 			struct pipe_screen_config cfg = {.options = &opts, .options_info = &opt_info};
 			struct pipe_screen *screen = fd_drm_screen_create_renderonly(fd, NULL, &cfg);
@@ -77,6 +79,7 @@ midogl_init(void)
 				fscreen = calloc(1, sizeof(*fscreen));
 				fscreen->screen = screen;
 				fscreen->get_param = fs_get_param;
+				sweetgl_image_hooks(fscreen);
 				midogl_log("screen: %s / %s", screen->get_name(screen), screen->get_vendor(screen));
 			}
 		}
@@ -116,4 +119,63 @@ bool
 midogl_make_current(struct midogl_ctx *c)
 {
 	return st_api_make_current(c ? c->st : NULL, NULL, NULL);
+}
+
+/* ---- the context API eagl.c uses ---- */
+struct sweetgl_ctx {
+	struct st_context *st;
+};
+
+bool
+sweetgl_init(void)
+{
+	return midogl_init();
+}
+
+struct pipe_screen *
+sweetgl_screen(void)
+{
+	return fscreen ? fscreen->screen : NULL;
+}
+
+struct sweetgl_ctx *
+sweetgl_create(int api, struct sweetgl_ctx *share)
+{
+	if (!midogl_init()) {
+		return NULL;
+	}
+	struct st_context_attribs attribs = {
+		.profile = API_OPENGLES2,
+		.major = api >= 3 ? 3 : 2,
+		.minor = api >= 3 ? 1 : 0,
+	};
+	enum st_context_error err = ST_CONTEXT_SUCCESS;
+	struct st_context *st = st_api_create_context(fscreen, &attribs, &err, share ? share->st : NULL);
+	if (st == NULL) {
+		midogl_log("GLES %d context failed: %d", attribs.major, err);
+		return NULL;
+	}
+	struct sweetgl_ctx *c = calloc(1, sizeof(*c));
+	c->st = st;
+	st->frontend_context = c;
+	return c;
+}
+
+bool
+sweetgl_make_current(struct sweetgl_ctx *c)
+{
+	return st_api_make_current(c ? c->st : NULL, NULL, NULL);
+}
+
+void
+sweetgl_destroy(struct sweetgl_ctx *c)
+{
+	if (c == NULL) {
+		return;
+	}
+	if (st_api_get_current() == c->st) {
+		st_api_make_current(NULL, NULL, NULL);
+	}
+	st_destroy_context(c->st);
+	free(c);
 }

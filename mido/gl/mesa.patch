@@ -84,3 +84,19 @@ index 3d405aa..59c7fcb 100644
  
     DBG("Pipe Info:");
     DBG(" GPU-id:          %s", fd_dev_name(screen->dev_id));
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1661,6 +1661,12 @@ fd_layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *han
+    else
+       rsc->layout.pitchalign = MAX2(rsc->layout.pitchalign, 5);
+ 
++#ifdef __APPLE__
++   if (is_a5xx(screen) && handle->modifier == DRM_FORMAT_MOD_LINEAR &&
++       handle->stride % 64 == 0)
++      rsc->layout.pitchalign = 6;
++#endif
++
+    if (rsc->layout.pitch0 < (prsc->width0 * rsc->layout.cpp) ||
+        fd_resource_pitch(rsc, 0) != rsc->layout.pitch0)
+       return false;

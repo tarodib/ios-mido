@@ -1811,6 +1811,95 @@ edit(AMFI,
      '\t.mpc_name = "SWEET AMFI",\n'
      '#endif\n')
 
+# ---------------------------------------------------------------------------
+# GPU step 4: IOSurfaces live in the GPU pool (physically contiguous, GPU address =
+# physical address, write-combined CPU mappings); MidoGPU selector 6 returns the address.
+# If the pool is full a surface falls back to wired memory (no GPU rendering to it).
+# ---------------------------------------------------------------------------
+SURF = 'iokit/Kernel/arm/SweetSurface.cpp'
+edit(SURF,
+     'OSDefineMetaClassAndStructors(SweetSurface, OSObject);\n\nvoid\nSweetSurface::free()\n{\n',
+     'OSDefineMetaClassAndStructors(SweetSurface, OSObject);\n\n'
+     '#if defined(MIDO_BOARD)\n'
+     'extern "C" uint64_t mido_gpu_bo_alloc(uint64_t size);\n'
+     'extern "C" void mido_gpu_bo_free(uint64_t pa, uint64_t size);\n'
+     '#define MIDO_POOL_START 0x99400000ull\n'
+     '#define MIDO_POOL_END   0x9ff00000ull\n'
+     '\n'
+     'static uint64_t\n'
+     'mido_surface_pa(SweetSurface *s)\n'
+     '{\n'
+     '\tif (s->memory == NULL || OSDynamicCast(IOBufferMemoryDescriptor, s->memory) != NULL) {\n'
+     '\t\treturn 0;\n'
+     '\t}\n'
+     '\tuint64_t pa = s->memory->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);\n'
+     '\treturn (pa >= MIDO_POOL_START && pa < MIDO_POOL_END) ? pa : 0;\n'
+     '}\n'
+     '\n'
+     'static bool\n'
+     'mido_surface_from_pool(SweetSurface *s)\n'
+     '{\n'
+     '\tuint64_t pa = mido_gpu_bo_alloc(s->allocSize);\n'
+     '\tif (pa == 0) {\n'
+     '\t\treturn false;\n'
+     '\t}\n'
+     '\ts->memory = IOMemoryDescriptor::withPhysicalAddress(pa, s->allocSize, kIODirectionInOut);\n'
+     '\tif (s->memory == NULL) {\n'
+     '\t\tmido_gpu_bo_free(pa, s->allocSize);\n'
+     '\t\treturn false;\n'
+     '\t}\n'
+     '\tIOMemoryMap *map = s->memory->map(kIOMapWriteCombineCache);\n'
+     '\tif (map == NULL) {\n'
+     '\t\tOSSafeReleaseNULL(s->memory);\n'
+     '\t\tmido_gpu_bo_free(pa, s->allocSize);\n'
+     '\t\treturn false;\n'
+     '\t}\n'
+     '\tbzero((void *)map->getVirtualAddress(), s->allocSize);\n'
+     '\tmap->release();\n'
+     '\ts->mapCache = kIOMapWriteCombineCache;\n'
+     '\treturn true;\n'
+     '}\n'
+     '#endif\n\n'
+     'void\nSweetSurface::free()\n{\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tuint64_t mido_pa = mido_surface_pa(this);\n'
+     '\tif (mido_pa != 0) {\n'
+     '\t\tOSSafeReleaseNULL(kernelMap);\n'
+     '\t\tOSSafeReleaseNULL(memory);\n'
+     '\t\tmido_gpu_bo_free(mido_pa, allocSize);\n'
+     '\t}\n'
+     '#endif\n')
+edit(SURF,
+     '\tret = sweet_surface_layout(s, props);\n\tif (ret == kIOReturnSuccess) {\n',
+     '\tret = sweet_surface_layout(s, props);\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tif (ret == kIOReturnSuccess && mido_surface_from_pool(s)) {\n'
+     '\t\tif (!sweet_surface_publish(s)) {\n'
+     '\t\t\tret = kIOReturnNoResources;\n'
+     '\t\t}\n'
+     '\t} else\n'
+     '#endif\n'
+     '\tif (ret == kIOReturnSuccess) {\n')
+edit(SURF,
+     'IOReturn\nIOSurfaceRootUserClient::create(IOExternalMethodArguments *args)\n',
+     '#if defined(MIDO_BOARD)\n'
+     '/* GPU address and size of a surface: false if it is not in the GPU pool. */\n'
+     'extern "C" bool\n'
+     'mido_surface_info(uint32_t id, uint64_t *pa, uint64_t *size)\n'
+     '{\n'
+     '\tSweetSurface *s = sweet_surface_copy(id);\n'
+     '\tif (s == NULL) {\n'
+     '\t\treturn false;\n'
+     '\t}\n'
+     '\t*pa = mido_surface_pa(s);\n'
+     '\t*size = s->allocSize;\n'
+     '\tbool ok = *pa != 0;\n'
+     '\ts->release();\n'
+     '\treturn ok;\n'
+     '}\n'
+     '#endif\n\n'
+     'IOReturn\nIOSurfaceRootUserClient::create(IOExternalMethodArguments *args)\n')
+
 if failures:
     print('MIDO EDIT FAILURES:')
     for f in failures:

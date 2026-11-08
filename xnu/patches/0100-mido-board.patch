@@ -13,7 +13,7 @@ index 6630131..5b98298 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_gpu.c b/bsd/dev/mido_gpu.c
 new file mode 100644
-index 0000000..cb07f6f
+index 0000000..6b8b855
 --- /dev/null
 +++ b/bsd/dev/mido_gpu.c
 @@ -0,0 +1,653 @@
@@ -485,7 +485,7 @@ index 0000000..cb07f6f
 +uint64_t mido_gpu_bo_alloc(uint64_t size)
 +{
 +	uint64_t pages = (size + POOL_PAGE - 1) / POOL_PAGE, run = 0;
-+	if (!g_ready || pages == 0 || pages > POOL_PAGES) {
++	if (pages == 0 || pages > POOL_PAGES) {             /* also before the GPU is up: surfaces */
 +		return 0;
 +	}
 +	lck_mtx_lock(&mido_gpu_mtx);
@@ -628,7 +628,7 @@ index 0000000..cb07f6f
 +{
 +	(void)arg;
 +	(void)wr_;
-+	delay(20 * 1000 * 1000);                            /* let the boot log settle first */
++	delay(3 * 1000 * 1000);                             /* before backboardd needs the GPU */
 +	printf("MIDO GPU: bring-up starting\n");
 +	gcc = ml_io_map(P_GCC, 0x20000);
 +	gpu = ml_io_map(P_GPU, 0x40000);
@@ -1631,10 +1631,10 @@ index cb67b4d..7c13962 100644
  };
 diff --git a/iokit/Kernel/arm/MidoGPU.cpp b/iokit/Kernel/arm/MidoGPU.cpp
 new file mode 100644
-index 0000000..8905165
+index 0000000..f860fe6
 --- /dev/null
 +++ b/iokit/Kernel/arm/MidoGPU.cpp
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,230 @@
 +/*
 + * MidoGPU: user-space access to the Adreno 506 brought up by bsd/dev/mido_gpu.c.
 + *
@@ -1669,6 +1669,7 @@ index 0000000..8905165
 +uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
 +int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms);
 +uint32_t mido_gpu_param(uint32_t which);
++bool mido_surface_info(uint32_t id, uint64_t *pa, uint64_t *size);
 +}
 +
 +class MidoGPU : public IOService {
@@ -1834,6 +1835,18 @@ index 0000000..8905165
 +		}
 +		a->scalarOutput[0] = mido_gpu_wait((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1]) ? 1 : 0;
 +		return kIOReturnSuccess;
++	case 6: {                                           /* surface id -> gpu address, size */
++		uint64_t pa = 0, size = 0;
++		if (a->scalarInputCount < 1 || a->scalarOutputCount < 2) {
++			return kIOReturnBadArgument;
++		}
++		if (!mido_surface_info((uint32_t)a->scalarInput[0], &pa, &size)) {
++			return kIOReturnNotFound;
++		}
++		a->scalarOutput[0] = pa;
++		a->scalarOutput[1] = size;
++		return kIOReturnSuccess;
++	}
 +	case 5: {
 +		char text[256];
 +		uint32_t n = a->structureInputSize < sizeof(text) - 1 ? a->structureInputSize : sizeof(text) - 1;
@@ -2070,6 +2083,107 @@ index a62416c..9c89b65 100644
  bool
  IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
  {
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..5558ccd 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -77,9 +77,58 @@ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+ 
+ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+ 
++#if defined(MIDO_BOARD)
++extern "C" uint64_t mido_gpu_bo_alloc(uint64_t size);
++extern "C" void mido_gpu_bo_free(uint64_t pa, uint64_t size);
++#define MIDO_POOL_START 0x99400000ull
++#define MIDO_POOL_END   0x9ff00000ull
++
++static uint64_t
++mido_surface_pa(SweetSurface *s)
++{
++	if (s->memory == NULL || OSDynamicCast(IOBufferMemoryDescriptor, s->memory) != NULL) {
++		return 0;
++	}
++	uint64_t pa = s->memory->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
++	return (pa >= MIDO_POOL_START && pa < MIDO_POOL_END) ? pa : 0;
++}
++
++static bool
++mido_surface_from_pool(SweetSurface *s)
++{
++	uint64_t pa = mido_gpu_bo_alloc(s->allocSize);
++	if (pa == 0) {
++		return false;
++	}
++	s->memory = IOMemoryDescriptor::withPhysicalAddress(pa, s->allocSize, kIODirectionInOut);
++	if (s->memory == NULL) {
++		mido_gpu_bo_free(pa, s->allocSize);
++		return false;
++	}
++	IOMemoryMap *map = s->memory->map(kIOMapWriteCombineCache);
++	if (map == NULL) {
++		OSSafeReleaseNULL(s->memory);
++		mido_gpu_bo_free(pa, s->allocSize);
++		return false;
++	}
++	bzero((void *)map->getVirtualAddress(), s->allocSize);
++	map->release();
++	s->mapCache = kIOMapWriteCombineCache;
++	return true;
++}
++#endif
++
+ void
+ SweetSurface::free()
+ {
++#if defined(MIDO_BOARD)
++	uint64_t mido_pa = mido_surface_pa(this);
++	if (mido_pa != 0) {
++		OSSafeReleaseNULL(kernelMap);
++		OSSafeReleaseNULL(memory);
++		mido_gpu_bo_free(mido_pa, allocSize);
++	}
++#endif
+ 	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
+ 		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
+ 	}
+@@ -646,6 +695,23 @@ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArgument
+ 	return ret;
+ }
+ 
++#if defined(MIDO_BOARD)
++/* GPU address and size of a surface: false if it is not in the GPU pool. */
++extern "C" bool
++mido_surface_info(uint32_t id, uint64_t *pa, uint64_t *size)
++{
++	SweetSurface *s = sweet_surface_copy(id);
++	if (s == NULL) {
++		return false;
++	}
++	*pa = mido_surface_pa(s);
++	*size = s->allocSize;
++	bool ok = *pa != 0;
++	s->release();
++	return ok;
++}
++#endif
++
+ IOReturn
+ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ {
+@@ -684,6 +750,13 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 	}
+ 	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
+ 	ret = sweet_surface_layout(s, props);
++#if defined(MIDO_BOARD)
++	if (ret == kIOReturnSuccess && mido_surface_from_pool(s)) {
++		if (!sweet_surface_publish(s)) {
++			ret = kIOReturnNoResources;
++		}
++	} else
++#endif
+ 	if (ret == kIOReturnSuccess) {
+ 		IOBufferMemoryDescriptor *mem = NULL;
+ 		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index 27bc49d..f65cf5e 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp

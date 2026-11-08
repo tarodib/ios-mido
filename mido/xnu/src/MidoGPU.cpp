@@ -32,6 +32,7 @@ void mido_gpu_bo_free(uint64_t pa, uint64_t size);
 uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
 int mido_gpu_wait(uint32_t seq, uint32_t timeout_ms);
 uint32_t mido_gpu_param(uint32_t which);
+bool mido_surface_info(uint32_t id, uint64_t *pa, uint64_t *size);
 }
 
 class MidoGPU : public IOService {
@@ -197,6 +198,18 @@ MidoGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *
 		}
 		a->scalarOutput[0] = mido_gpu_wait((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1]) ? 1 : 0;
 		return kIOReturnSuccess;
+	case 6: {                                           /* surface id -> gpu address, size */
+		uint64_t pa = 0, size = 0;
+		if (a->scalarInputCount < 1 || a->scalarOutputCount < 2) {
+			return kIOReturnBadArgument;
+		}
+		if (!mido_surface_info((uint32_t)a->scalarInput[0], &pa, &size)) {
+			return kIOReturnNotFound;
+		}
+		a->scalarOutput[0] = pa;
+		a->scalarOutput[1] = size;
+		return kIOReturnSuccess;
+	}
 	case 5: {
 		char text[256];
 		uint32_t n = a->structureInputSize < sizeof(text) - 1 ? a->structureInputSize : sizeof(text) - 1;

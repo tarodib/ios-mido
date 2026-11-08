@@ -466,7 +466,7 @@ uint64_t mido_gpu_bo_alloc(uint64_t size);
 uint64_t mido_gpu_bo_alloc(uint64_t size)
 {
 	uint64_t pages = (size + POOL_PAGE - 1) / POOL_PAGE, run = 0;
-	if (!g_ready || pages == 0 || pages > POOL_PAGES) {
+	if (pages == 0 || pages > POOL_PAGES) {             /* also before the GPU is up: surfaces */
 		return 0;
 	}
 	lck_mtx_lock(&mido_gpu_mtx);
@@ -609,7 +609,7 @@ static void gpu_thread(void *arg, wait_result_t wr_)
 {
 	(void)arg;
 	(void)wr_;
-	delay(20 * 1000 * 1000);                            /* let the boot log settle first */
+	delay(3 * 1000 * 1000);                             /* before backboardd needs the GPU */
 	printf("MIDO GPU: bring-up starting\n");
 	gcc = ml_io_map(P_GCC, 0x20000);
 	gpu = ml_io_map(P_GPU, 0x40000);

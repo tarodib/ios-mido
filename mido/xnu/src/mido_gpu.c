@@ -561,6 +561,48 @@ uint32_t mido_gpu_param(uint32_t which)
 	}
 }
 
+/*
+ * GPU core clock (gfx3d RCG in GCC, src 1 = GPLL0 800 MHz, divider field 2 x div - 1).
+ * The shim votes VDD_CX level 0x100 first (rpm_cx_level); mido.dtb needs 0xc0 for 400 MHz.
+ * Only the GPLL0 steps are offered; 510+ MHz need GPLL3 programmed.
+ */
+static int
+gpu_set_clock(uint32_t mhz)
+{
+	uint32_t cfg;
+	switch (mhz) {
+	case 266: cfg = (1u << 8) | 5u; break;
+	case 320: cfg = (1u << 8) | 4u; break;
+	case 400: cfg = (1u << 8) | 3u; break;
+	default:
+		printf("MIDO GPU: unsupported clock %u MHz\n", mhz);
+		return -1;
+	}
+	wr(GFX3D_CFG, cfg);
+	wr(GFX3D_CMD, rd(GFX3D_CMD) | 1u);                  /* latch the new source/divider */
+	for (int i = 0; i < 1000 && (rd(GFX3D_CMD) & 1u); i++) {
+		delay(1);
+	}
+	if (rd(GFX3D_CMD) & 1u) {
+		printf("MIDO GPU: gfx3d clock switch did not complete (CMD %08x)\n", rd(GFX3D_CMD));
+		return -2;
+	}
+	return 0;
+}
+
+/* Count GPU cycles for 100 ms: RBBM_PERFCTR_CP_0, select PERF_CP_ALWAYS_COUNT. */
+static uint32_t
+gpu_measure_mhz(void)
+{
+	gw(0x0bb0, 0);                                      /* CP_PERFCTR_CP_SEL_0 */
+	gw(0x0464, 1);                                      /* RBBM_PERFCTR_CNTL: enable */
+	delay(100);
+	uint32_t a = gr(0x03a0);
+	delay(100000);
+	uint32_t b = gr(0x03a0);
+	return (b - a) / 100000;
+}
+
 static void gpu_thread(void *arg, wait_result_t wr_)
 {
 	(void)arg;
@@ -578,6 +620,15 @@ static void gpu_thread(void *arg, wait_result_t wr_)
 		return;
 	}
 	if (power_up() == 0 && cp_start() == 0 && blit_test() == 0) {
+		uint32_t mhz = 400;
+		PE_parse_boot_argn("midogpuclk", &mhz, sizeof(mhz));
+		printf("MIDO GPU: measured clock at XO: %u MHz\n", gpu_measure_mhz());
+		if (mhz && gpu_set_clock(mhz) == 0) {
+			printf("MIDO GPU: clock set to %u MHz, measured %u MHz\n", mhz, gpu_measure_mhz());
+			if (blit_test()) {
+				printf("MIDO GPU: blit FAILED at %u MHz\n", mhz);
+			}
+		}
 		printf("MIDO GPU: READY (power, zap shader, CP, 2D blit all OK)\n");
 		g_ready = 1;
 	} else {

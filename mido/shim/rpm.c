@@ -177,13 +177,42 @@ static int rpm_req(uint32_t type, uint32_t id, const uint32_t *kvp, unsigned nwo
 	return got ? 0 : -7;
 }
 
-int rpm_ldo_enable(unsigned ldo, uint32_t uv, uint32_t ma)
+static int rpm_opened;
+
+static int rpm_ensure_open(void)
 {
+	if (rpm_opened)
+		return 0;
 	int e = rpm_open();
 	if (e) {
 		con_puts(" RPM OPEN FAILED E="); con_dec((uint64_t)(int64_t)e); con_putc('\n');
 		return e;
 	}
+	rpm_opened = 1;
+	return 0;
+}
+
+/*
+ * VDD_CX level (PM8953 S2, RPM smpa 2, regulator-s2-level, key "vlvl"). The GPU runs from
+ * this rail through the gfx head switch; mido.dtb maps GPU corners 4..7 (400..650 MHz) to
+ * levels 0xc0, 0x100, 0x140, 0x180. Active-set vote; nothing else votes after the shim.
+ */
+int rpm_cx_level(uint32_t level)
+{
+	int e = rpm_ensure_open();
+	if (e)
+		return e;
+	const uint32_t kvp[] = {
+		0x6c766c76, 4, level,      /* "vlvl" */
+	};
+	return rpm_req(0x61706d73, 2, kvp, sizeof(kvp) / 4);     /* "smpa" */
+}
+
+int rpm_ldo_enable(unsigned ldo, uint32_t uv, uint32_t ma)
+{
+	int e = rpm_ensure_open();
+	if (e)
+		return e;
 	const uint32_t kvp[] = {
 		0x6e657773, 4, 1,          /* "swen" = 1 */
 		0x00007675, 4, uv,         /* "uv" */

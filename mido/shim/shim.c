@@ -9,6 +9,7 @@
  */
 #include <stdint.h>
 #include "console.h"
+#include "rpm.h"
 #include "sdhc.h"
 #include "spmi.h"
 #include "fdt.h"
@@ -451,6 +452,8 @@ void shim_main(uint64_t dtb)
 	if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
 		input_setup();   /* touch power/clocks/pins for XNU's mido_input.c */
 		perf_boost();    /* CPU PLL to the highest stable step (was GPLL0 800 MHz), CCI 800 */
+		con_puts(" GPU CX LEVEL 0x100\n");
+		rpm_cx_level(0x100);   /* GPU clock above XO runs from a higher VDD_CX level */
 		emmc_mode = sdhc_fast(0, log_ok ? CACHE_FIRST : 0);    /* eMMC 8-bit HS 50 MHz (2026-11-06: 1 MiB 654 -> 337 ms); XNU inherits it */
 		flush_log();
 		con_puts("\nLOADER:\n");

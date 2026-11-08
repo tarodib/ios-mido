@@ -38,20 +38,18 @@ shader(GLenum type, const char *src)
 
 /* iOS kills daemons over a small per-process limit (reason 7): Mesa needs more. */
 extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t size);
-#define MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT 6
 
 int
 main(void)
 {
 	sleep(5);
-	int r6 = memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0);
-	int e6 = errno;
-	int r5 = memorystatus_control(5 /* SET_JETSAM_HIGH_WATER_MARK */, getpid(), 1024, NULL, 0);
-	int e5 = errno;
+	struct { int32_t a; uint32_t aa; int32_t i; uint32_t ia; } lim = { 1024, 0, 1024, 0 };
+	int r7 = memorystatus_control(7 /* SET_MEMLIMIT_PROPERTIES */, getpid(), 0, &lim, sizeof(lim));
+	int e7 = errno;
 	if (!midogl_init()) {
 		return 1;
 	}
-	midogl_log("memory limit calls: task %d errno %d, hwm %d errno %d, uid %d", r6, e6, r5, e5, getuid());
+	midogl_log("memory limit: ret %d errno %d", r7, e7);
 	struct midogl_ctx *c = midogl_create(2, 0);
 	if (!c || !midogl_make_current(c)) {
 		midogl_log("no context");

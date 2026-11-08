@@ -1,5 +1,8 @@
 name: mesa-ios
 on:
+  push:
+    branches: [mido]
+    paths: ['mido/gl/**', '.github/workflows/mesa-ios.yml']
   workflow_dispatch:
     inputs:
       runner:

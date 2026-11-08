@@ -1,0 +1,33 @@
+diff --git a/src/freedreno/drm/freedreno_bo.c b/src/freedreno/drm/freedreno_bo.c
+index 1f99f36..6eb643d 100644
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -12,6 +12,15 @@
+ #include "freedreno_drm_perfetto.h"
+ #include "freedreno_priv.h"
+ 
++#ifdef __APPLE__
++/* iOS has no DRM file descriptors to mmap: midogl maps the buffer through MidoGPU. */
++void *midogl_bo_map(int fd, uint64_t offset, size_t size);
++#undef os_mmap
++#define os_mmap(addr, length, prot, flags, fd, offset) midogl_bo_map((fd), (offset), (length))
++#undef os_munmap
++#define os_munmap(addr, length) ((void)(addr), (void)(length), 0)   /* unmapped at GEM_CLOSE */
++#endif
++
+ simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
+ simple_mtx_t fence_lock = SIMPLE_MTX_INITIALIZER;
+ 
+diff --git a/src/freedreno/meson.build b/src/freedreno/meson.build
+index 29e1bc4..29e780d 100644
+--- a/src/freedreno/meson.build
++++ b/src/freedreno/meson.build
+@@ -22,7 +22,7 @@ subdir('ir2')
+ subdir('ir3')
+ subdir('fdl')
+ 
+-if system_has_kms_drm
++if system_has_kms_drm or host_machine.system() == 'darwin'
+   subdir('drm')
+ endif
+ 

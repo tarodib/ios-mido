@@ -435,7 +435,7 @@ static int blit_test(void)
 
 /*
  * ---- API for the IOKit user client (iokit/Kernel/arm/MidoGPU.cpp) ----
- * Buffer objects come from a fixed physical pool (0x99400000..0x9ff00000, below pstore)
+ * Buffer objects come from a fixed physical pool (0x50000000..0x70000000, below the carve-outs)
  * in 16 KB pages (the user page size); GPU address = physical address (the GPU SMMU
  * context bank is left untranslated). Submission appends to the 16 KB ring, word by
  * word with wrap-around (like Linux msm_ringbuffer): CP_INDIRECT_BUFFER, a CCU colour
@@ -444,8 +444,8 @@ static int blit_test(void)
  */
 #include <kern/locks.h>
 
-#define P_POOL       0x99400000UL
-#define POOL_END     0x9ff00000UL
+#define P_POOL       0x50000000UL    /* 512 MB of DRAM unused below every carve-out */
+#define POOL_END     0x70000000UL
 #define POOL_PAGE    0x4000UL
 #define POOL_PAGES   ((POOL_END - P_POOL) / POOL_PAGE)
 #define RING_DW      4096u

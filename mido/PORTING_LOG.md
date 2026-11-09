@@ -962,3 +962,12 @@ on the phone. What it took after stage 2 (in order of discovery):
 - Fix, adapted from ios-sailfish by Joran Vancoillie with the author's permission (patches 0152,
   0153, 0157-0160, 0162): refuse sel 6/7, IOSurfaceAddress client-memory surfaces (read-only
   fallback), 64-byte row rules. Not yet booted.
+
+### GPU step 4b/4c: CoreAnimation renders on the Adreno (2026-11-09)
+- gpu10 (kernel run 42654570006): **home screen, App Library and Settings composited by the A506
+  through Mesa**; backboardd did not crash. Visible problems: flat grey dock, blobby blur, slow.
+- Log: 269 `BONew` failures (0xe00002bd, 8-12 MB requests): the 107 MB pool was exhausted now that
+  IOSurfaces share it. GPU finish time averaged 1-12 ms, so the GPU is not the bottleneck.
+- Pool moved to 0x50000000-0x70000000 (512 MB, below every carve-out). Not yet booted.
+- Still open: QuartzCore texture function patches need addresses for this iOS build (blur/material
+  rendering); CPU-side and display-path speed.

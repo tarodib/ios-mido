@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..4201394 100644
+index a62416c..52ded67 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -2033,7 +2033,7 @@ index a62416c..4201394 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +460,236 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +460,246 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -2110,6 +2110,12 @@ index a62416c..4201394 100644
 +			uint32_t ck = MDP_R(0x2ac);
 +			MDP_W(0x2ac, ck | 1u);                   /* VIG0 clock force on (mdss-pipe-vig-clk-ctrl) */
 +			IOLog("MIDO MDP: mode %d, clk ctrl 0x2ac %08x -> %08x\n", on, ck, MDP_R(0x2ac));
++			vm_offset_t gcc = ml_io_map(0x0184d000, 0x1000);   /* GCC mdp_clk_src RCG (read only) */
++			if (gcc) {
++				IOLog("MIDO MDP: mdp_clk rcg cmd %08x cfg %08x\n",
++				    *(volatile uint32_t *)(gcc + 0x14), *(volatile uint32_t *)(gcc + 0x18));
++			}
++			MDP_W(0x1018, 0xffffffffu);                /* clear MDP interrupt status */
 +		}
 +		IOLog("MIDO MDP: VIG0 scanout %s\n", mido_mdp ? "enabled" : "off");
 +	}
@@ -2140,7 +2146,9 @@ index a62416c..4201394 100644
 +		MDP_W(VIG0 + 0x38, mido_mdp_pe ? 0x80000000u : 0u);   /* SRC_OP_MODE: SW_PIX_EXT_OVERRIDE */
 +		MDP_W(VIG0 + 0xb4, 0);                      /* DECIMATION */
 +		MDP_W(VIG0 + 0x200, 0);                     /* OP_MODE: no CSC */
-+		MDP_W(VIG0 + 0x204, (sx_on ? 1u | (f << 8) | (f << 16) : 0u) | (sy_on ? 2u | (f << 10) | (f << 18) : 0u));
++		/* filters for components 0 (bits 8/10), 1+2 (12/14) and 3 (16/18), X/Y */
++		MDP_W(VIG0 + 0x204, (sx_on ? 1u | (f << 8) | (f << 12) | (f << 16) : 0u) |
++		    (sy_on ? 2u | (f << 10) | (f << 14) | (f << 18) : 0u));
 +		MDP_W(VIG0 + 0x210, (uint32_t)(((uint64_t)cw << 21) / panelw));
 +		MDP_W(VIG0 + 0x214, (uint32_t)(((uint64_t)ch << 21) / panelh));
 +		MDP_W(VIG0 + 0x220, 0);
@@ -2163,8 +2171,10 @@ index a62416c..4201394 100644
 +		MDP_W(CTL0 + 0x18, 0x1u | 0x20000u);        /* flush VIG0, CTL */
 +	}
 +	if (++mido_mdp_flips <= 6 || mido_mdp_flips % 240 == 1) {
-+		IOLog("MIDO MDP: flip %u src %08x latched %08x layer %08x flush %08x\n", mido_mdp_flips,
-+		    (uint32_t)pa, MDP_R(VIG0 + 0xa4), MDP_R(CTL0), MDP_R(CTL0 + 0x18));
++		uint32_t irq = MDP_R(0x1014);               /* bits 24-27: INTF0-3 underrun */
++		MDP_W(0x1018, irq);
++		IOLog("MIDO MDP: flip %u src %08x latched %08x layer %08x flush %08x irq %08x\n", mido_mdp_flips,
++		    (uint32_t)pa, MDP_R(VIG0 + 0xa4), MDP_R(CTL0), MDP_R(CTL0 + 0x18), irq);
 +	}
 +	return true;
 +}

@@ -1497,6 +1497,21 @@ edit(FB,
      '\treturn true;\n'
      '}\n'
      '\n'
+     '/* The panel left the previous buffer once the flush bit clears (one frame at most). */\n'
+     'static bool\n'
+     'mido_mdp_active(void)\n'
+     '{\n'
+     '\treturn mido_mdp != 0 && mido_mdp_staged;\n'
+     '}\n'
+     '\n'
+     'static void\n'
+     'mido_mdp_wait_latch(void)\n'
+     '{\n'
+     '\tfor (int i = 0; i < 40 && mido_mdp_active() && (MDP_R(CTL0 + 0x18) & 1u); i++) {\n'
+     '\t\tIOSleep(1);\n'
+     '\t}\n'
+     '}\n'
+     '\n'
      'static void\n'
      'mido_mdp_unstage(void)\n'
      '{\n'
@@ -1952,6 +1967,8 @@ edit(FB,
      'void\nAppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)\n{\n\tAppleCLCD *fb = (AppleCLCD *)owner;\n',
      '#if defined(MIDO_BOARD)\n'
      'static bool mido_mdp_busy(void);\n'
+     'static bool mido_mdp_active(void);\n'
+     'static void mido_mdp_wait_latch(void);\n'
      '#endif\n\n'
      'void\nAppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)\n{\n\tAppleCLCD *fb = (AppleCLCD *)owner;\n'
      '#if defined(MIDO_BOARD)\n'
@@ -1960,6 +1977,20 @@ edit(FB,
      '\t\treturn;\n'
      '\t}\n'
      '#endif\n')
+
+# iOS rotates two buffers and starts drawing into the other one as soon as a swap returns, so
+# with zero copy a swap must not return until the panel has really left that buffer.
+edit(FB,
+     'AppleCLCD::swap(const uint8_t *rec)\n{\n\tIOLockLock(fLock);\n',
+     'AppleCLCD::swap(const uint8_t *rec)\n{\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tif (mido_mdp_active()) {\n'
+     '\t\tpresent(rec);\n'
+     '\t\tmido_mdp_wait_latch();\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '#endif\n'
+     '\tIOLockLock(fLock);\n')
 
 # ---------------------------------------------------------------------------
 # GPU step 4: IOSurfaces live in the GPU pool (physically contiguous, GPU address =

@@ -1485,6 +1485,18 @@ edit(FB,
      '#define VIG0 0x5000u\n'
      '#define CTL0 0x2000u\n'
      '\n'
+     '/* True while a flip is still waiting for the panel vsync (at most about 3 frames). */\n'
+     'static bool\n'
+     'mido_mdp_busy(void)\n'
+     '{\n'
+     '\tstatic uint32_t waited;\n'
+     '\tif (mido_mdp == 0 || !mido_mdp_staged || !(MDP_R(CTL0 + 0x18) & 1u) || ++waited > 50) {\n'
+     '\t\twaited = 0;\n'
+     '\t\treturn false;\n'
+     '\t}\n'
+     '\treturn true;\n'
+     '}\n'
+     '\n'
      'static void\n'
      'mido_mdp_unstage(void)\n'
      '{\n'
@@ -1933,6 +1945,22 @@ edit(AMFI,
      '#else\n'
      '\t.mpc_name = "SWEET AMFI",\n'
      '#endif\n')
+
+# Display flips must pace iOS: with zero copy the panel reads iOS's own buffers, so the next
+# vsync notification waits until the previous flip has really latched.
+edit(FB,
+     'void\nAppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)\n{\n\tAppleCLCD *fb = (AppleCLCD *)owner;\n',
+     '#if defined(MIDO_BOARD)\n'
+     'static bool mido_mdp_busy(void);\n'
+     '#endif\n\n'
+     'void\nAppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)\n{\n\tAppleCLCD *fb = (AppleCLCD *)owner;\n'
+     '#if defined(MIDO_BOARD)\n'
+     '\tif (mido_mdp_busy()) {\n'
+     '\t\tsender->setTimeoutUS(1000);\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '#endif\n')
+')
 
 # ---------------------------------------------------------------------------
 # GPU step 4: IOSurfaces live in the GPU pool (physically contiguous, GPU address =

@@ -10,6 +10,7 @@
  */
 #include <dlfcn.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach/thread_info.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -46,6 +47,93 @@ struct prof_thr {
 	char name[24];
 	uint32_t seen;
 };
+
+/* libproc (no public iOS header); times are mach absolute units on arm64 */
+extern int proc_listallpids(void *buffer, int buffersize);
+extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, uint32_t buffersize);
+struct mido_taskinfo {
+	uint64_t virtual_size, resident_size, total_user, total_system, threads_user, threads_system;
+	int32_t policy, faults, pageins, cow_faults, messages_sent, messages_received;
+	int32_t syscalls_mach, syscalls_unix, csw, threadnum, numrunning, priority;
+};
+#define PROF_PROCS 512
+struct prof_proc {
+	int pid;
+	uint64_t last, delta;
+	uint32_t seen;
+};
+static struct prof_proc prof_procs[PROF_PROCS];
+static uint32_t prof_proc_round;
+
+/* Every process's CPU time since the previous call, top 8 logged. */
+static void
+prof_procs_cpu(double secs, int log)
+{
+	static int pids[PROF_PROCS];
+	static mach_timebase_info_data_t tb;
+	if (tb.denom == 0) {
+		mach_timebase_info(&tb);
+	}
+	int n = proc_listallpids(pids, sizeof(pids)) ;
+	if (n <= 0) {
+		if (log) {
+			midogl_log("prof: process list unavailable (%d)", n);
+		}
+		return;
+	}
+	n = n > PROF_PROCS ? PROF_PROCS : n;
+	prof_proc_round++;
+	for (int i = 0; i < n; i++) {
+		struct mido_taskinfo ti;
+		if (pids[i] <= 0 || proc_pidinfo(pids[i], 4 /* PROC_PIDTASKINFO */, 0, &ti, sizeof(ti)) != (int)sizeof(ti)) {
+			continue;
+		}
+		uint64_t t = ti.total_user + ti.total_system;
+		struct prof_proc *p = NULL;
+		for (int j = 0; j < PROF_PROCS && p == NULL; j++) {
+			if (prof_procs[j].pid == pids[i]) {
+				p = &prof_procs[j];
+			}
+		}
+		for (int j = 0; j < PROF_PROCS && p == NULL; j++) {
+			if (prof_procs[j].pid == 0 || prof_procs[j].seen + 2 < prof_proc_round) {
+				p = &prof_procs[j];
+				p->pid = pids[i];
+				p->last = t;
+			}
+		}
+		if (p != NULL) {
+			p->delta = t - p->last;
+			p->last = t;
+			p->seen = prof_proc_round;
+		}
+	}
+	if (!log) {
+		return;
+	}
+	char line[400];
+	int len = snprintf(line, sizeof(line), "prof: process CPU");
+	for (int k = 0; k < 8; k++) {
+		struct prof_proc *best = NULL;
+		for (int j = 0; j < PROF_PROCS; j++) {
+			struct prof_proc *p = &prof_procs[j];
+			if (p->pid != 0 && p->seen == prof_proc_round && p->delta != 0 &&
+			    (best == NULL || p->delta > best->delta)) {
+				best = p;
+			}
+		}
+		if (best == NULL || len >= (int)sizeof(line) - 1) {
+			break;
+		}
+		char name[32] = "?";
+		proc_name(best->pid, name, sizeof(name));
+		double ns = (double)best->delta * tb.numer / tb.denom;
+		len += snprintf(line + len, sizeof(line) - len, " %s %.0f%%", name, 100.0 * ns / (secs * 1e9));
+		best->delta = 0;
+	}
+	midogl_log("%s", line);
+}
 
 static struct prof_sym prof_syms[PROF_SYMS];
 static struct prof_img prof_imgs[PROF_IMGS];
@@ -196,6 +284,7 @@ prof_report(double secs)
 		best->delta_ns = 0;     /* printed; last_ns keeps the running total */
 	}
 	midogl_log("%s", line);
+	prof_procs_cpu(secs, 1);
 	memset(prof_syms, 0, sizeof(prof_syms));
 	memset(prof_imgs, 0, sizeof(prof_imgs));
 	prof_samples = prof_ticks = 0;
@@ -213,11 +302,12 @@ prof_thread(void *arg)
 	(void)arg;
 	pthread_setname_np("midogl-prof");
 	sleep(20);
-	prof_threads_cpu();     /* baseline for the per-thread CPU deltas */
+	prof_threads_cpu();     /* baselines for the per-thread and per-process CPU deltas */
+	prof_procs_cpu(0, 0);
 	thread_act_t self = mach_thread_self();
 	uint64_t window = prof_now_ns();
 	for (;;) {
-		usleep(5000);
+		usleep(10000);  /* ~100 Hz: at 200 Hz the profiler itself took 13% of a core */
 		thread_act_array_t th;
 		mach_msg_type_number_t nth;
 		uintptr_t pcs[32];
@@ -253,6 +343,7 @@ prof_thread(void *arg)
 				memset(prof_imgs, 0, sizeof(prof_imgs));
 				prof_samples = prof_ticks = 0;
 				prof_threads_cpu();
+				prof_procs_cpu(0, 0);
 			}
 			window = now;
 		}

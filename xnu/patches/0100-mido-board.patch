@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..a13ea96 100644
+index a62416c..3a0ece3 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -1980,7 +1980,7 @@ index a62416c..a13ea96 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -206,10 +237,22 @@ AppleCLCD::start(IOService *provider)
+@@ -206,10 +237,24 @@ AppleCLCD::start(IOService *provider)
  	return true;
  }
  
@@ -1988,6 +1988,7 @@ index a62416c..a13ea96 100644
 +static bool mido_mdp_busy(void);
 +static bool mido_mdp_active(void);
 +static void mido_mdp_wait_latch(void);
++static uint32_t mido_vsync_sent;
 +#endif
 +
  void
@@ -1999,25 +2000,51 @@ index a62416c..a13ea96 100644
 +		sender->setTimeoutUS(1000);
 +		return;
 +	}
++	mido_vsync_sent++;
 +#endif
  	uint64_t now = mach_absolute_time();
  	uint64_t count = ++fb->fVsyncCount;
  	uint64_t values[6] = {
-@@ -299,6 +342,13 @@ static uint64_t sweet_fb_swap_count;
+@@ -299,6 +344,38 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
 +#if defined(MIDO_BOARD)
 +	if (mido_mdp_active()) {
++		/* swap timing, logged every 10 s: rate, time held for the latch, longest gap */
++		static uint64_t st_n, st_wait, st_wait_max, st_gap_max, st_last, st_win;
++		uint64_t t0 = mach_absolute_time();
 +		present(rec);
 +		mido_mdp_wait_latch();
++		uint64_t t1 = mach_absolute_time(), ns;
++		absolutetime_to_nanoseconds(t1 - t0, &ns);
++		st_n++;
++		st_wait += ns;
++		st_wait_max = ns > st_wait_max ? ns : st_wait_max;
++		if (st_last != 0) {
++			absolutetime_to_nanoseconds(t0 - st_last, &ns);
++			st_gap_max = ns > st_gap_max ? ns : st_gap_max;
++		}
++		st_last = t1;
++		if (st_win == 0) {
++			st_win = t1;
++		}
++		absolutetime_to_nanoseconds(t1 - st_win, &ns);
++		if (ns >= 10000000000ull) {
++			IOLog("MIDO MDP: %llu swaps/s, swap held avg %llu us max %llu us, longest gap %llu ms, vsyncs sent %u/s\n",
++			    st_n * 1000000000ull / ns, st_wait / st_n / 1000, st_wait_max / 1000, st_gap_max / 1000000,
++			    (uint32_t)(mido_vsync_sent * 1000000000ull / ns));
++			st_n = st_wait = st_wait_max = st_gap_max = 0;
++			mido_vsync_sent = 0;
++			st_win = t1;
++		}
 +		return;
 +	}
 +#endif
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
-@@ -359,6 +409,15 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -359,6 +436,15 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -2033,7 +2060,7 @@ index a62416c..a13ea96 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +460,253 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +487,253 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  

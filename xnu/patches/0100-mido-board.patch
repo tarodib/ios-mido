@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..52ded67 100644
+index a62416c..a13ea96 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -2033,7 +2033,7 @@ index a62416c..52ded67 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +460,246 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +460,253 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -2149,10 +2149,17 @@ index a62416c..52ded67 100644
 +		/* filters for components 0 (bits 8/10), 1+2 (12/14) and 3 (16/18), X/Y */
 +		MDP_W(VIG0 + 0x204, (sx_on ? 1u | (f << 8) | (f << 12) | (f << 16) : 0u) |
 +		    (sy_on ? 2u | (f << 10) | (f << 14) | (f << 18) : 0u));
-+		MDP_W(VIG0 + 0x210, (uint32_t)(((uint64_t)cw << 21) / panelw));
-+		MDP_W(VIG0 + 0x214, (uint32_t)(((uint64_t)ch << 21) / panelh));
++		/* phase steps and initial phases: components 0+3 (0x210..), 1+2 (0x218..); with the */
++		/* 1+2 step left at 0 that half of the scaler never advanced and the panel underran */
++		uint32_t stx = (uint32_t)(((uint64_t)cw << 21) / panelw), sty = (uint32_t)(((uint64_t)ch << 21) / panelh);
++		MDP_W(VIG0 + 0x210, stx);
++		MDP_W(VIG0 + 0x214, sty);
++		MDP_W(VIG0 + 0x218, stx);
++		MDP_W(VIG0 + 0x21c, sty);
 +		MDP_W(VIG0 + 0x220, 0);
 +		MDP_W(VIG0 + 0x224, 0);
++		MDP_W(VIG0 + 0x228, 0);
++		MDP_W(VIG0 + 0x22c, 0);
 +		for (uint32_t c = 0; c < 3; c++) {          /* SW_PIX_EXT comps 0, 1/2, 3 */
 +			MDP_W(VIG0 + 0x100 + c * 0x10, sx_on && mido_mdp_pe ? 1u << 16 : 0u);    /* LR: 1 right repeat */
 +			MDP_W(VIG0 + 0x104 + c * 0x10, sy_on && mido_mdp_pe ? 1u << 16 : 0u);    /* TB: 1 bottom repeat */

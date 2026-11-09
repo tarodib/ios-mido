@@ -2084,10 +2084,10 @@ index a62416c..9c89b65 100644
  IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
  {
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 7f90c56..5558ccd 100644
+index 7f90c56..63bc12b 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
-@@ -77,9 +77,58 @@ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+@@ -77,13 +77,65 @@ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
  
  OSDefineMetaClassAndStructors(SweetSurface, OSObject);
  
@@ -2146,7 +2146,84 @@ index 7f90c56..5558ccd 100644
  	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
  		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
  	}
-@@ -646,6 +695,23 @@ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArgument
+ 	OSSafeReleaseNULL(kernelMap);
++	if (clientMemory && memory != NULL) {
++		memory->complete();
++	}
+ 	OSSafeReleaseNULL(memory);
+ 	OSSafeReleaseNULL(state);
+ 	OSObject::free();
+@@ -98,7 +150,7 @@ SweetSurface::kernelAddress()
+ 	}
+ 	IOLockLock(sweet_surface_lock);
+ 	if (kernelMap == NULL && memory != NULL) {
+-		kernelMap = memory->map(kIOMapWriteCombineCache);
++		kernelMap = memory->map(mapCache | (readOnly ? kIOMapReadOnly : 0));
+ 	}
+ 	IOLockUnlock(sweet_surface_lock);
+ 	return kernelMap != NULL ? (uintptr_t)kernelMap->getVirtualAddress() : 0;
+@@ -270,12 +322,26 @@ sweet_div_up(uint32_t a, uint32_t b)
+ }
+ 
+ static uint32_t
+-sweet_row_bytes(uint32_t width, uint32_t ew, uint32_t bpe)
++sweet_row_align(uint64_t row)
+ {
+-	uint64_t row = (uint64_t)sweet_div_up(width, ew) * bpe;
+ 	return (uint32_t)((row + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint64_t)(SWEET_SURFACE_ROW_ALIGN - 1));
+ }
+ 
++static uint32_t
++sweet_row_bytes(uint32_t width, uint32_t ew, uint32_t bpe)
++{
++	return sweet_row_align((uint64_t)sweet_div_up(width, ew) * bpe);
++}
++
++static uint32_t
++sweet_rows(uint32_t asked, uint32_t width, uint32_t ew, uint32_t bpe, unsigned int keys)
++{
++	if (asked == 0) {
++		return sweet_row_bytes(width, ew, bpe);
++	}
++	return keys <= 6 ? asked : sweet_row_align(asked);
++}
++
+ /* Geometry from the creation properties (IOSurface.h keys). */
+ static IOReturn
+ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+@@ -294,8 +360,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+ 	    s->bytesPerElement > 64 || s->elementWidth == 0 || s->elementHeight == 0) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	s->bytesPerRow = sweet_dict_u32(props, "IOSurfaceBytesPerRow",
+-	    sweet_row_bytes(s->width, s->elementWidth, s->bytesPerElement));
++	s->bytesPerRow = sweet_rows(sweet_dict_u32(props, "IOSurfaceBytesPerRow", 0),
++	    s->width, s->elementWidth, s->bytesPerElement, props->getCount());
+ 	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
+ 		return kIOReturnBadArgument;
+ 	}
+@@ -323,8 +389,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+ 			    p->bytesPerElement > 64 || p->elementWidth == 0 || p->elementHeight == 0) {
+ 				return kIOReturnBadArgument;
+ 			}
+-			p->bytesPerRow = sweet_dict_u32(pd, "IOSurfacePlaneBytesPerRow",
+-			    sweet_row_bytes(p->width, p->elementWidth, p->bytesPerElement));
++			p->bytesPerRow = sweet_rows(sweet_dict_u32(pd, "IOSurfacePlaneBytesPerRow", 0),
++			    p->width, p->elementWidth, p->bytesPerElement, props->getCount());
+ 			p->offset = sweet_dict_u32(pd, "IOSurfacePlaneOffset", (uint32_t)next);
+ 			p->size = sweet_dict_u32(pd, "IOSurfacePlaneSize",
+ 			    p->bytesPerRow * sweet_div_up(p->height, p->elementHeight));
+@@ -527,7 +593,8 @@ IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool
+ 	s->retain();
+ 	ref->surface = s;
+ 	ref->count = 1;
+-	ref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);
++	ref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache |
++	    (s->readOnly ? kIOMapReadOnly : 0));
+ 	ref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);
+ 	if (ref->data == NULL || ref->state == NULL) {
+ 		ref->release();
+@@ -646,6 +713,23 @@ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArgument
  	return ret;
  }
  
@@ -2170,10 +2247,45 @@ index 7f90c56..5558ccd 100644
  IOReturn
  IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  {
-@@ -684,6 +750,13 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+@@ -684,6 +768,48 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  	}
  	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
  	ret = sweet_surface_layout(s, props);
++	OSNumber *address = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAddress"));
++	if (ret == kIOReturnSuccess && address != NULL) {
++		/* the creator's memory: whole pages from the one holding the address */
++		uint64_t addr = address->unsigned64BitValue(), start = trunc_page_64(addr);
++		/* its rows as they are: no GPU alignment (eagl.c copies unaligned ones) */
++		uint32_t bpr = sweet_dict_u32(props, "IOSurfaceBytesPerRow", 0);
++		if (bpr >= (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
++			s->bytesPerRow = bpr;
++		}
++		uint64_t len = round_page_64((addr - start) + (uint64_t)s->bytesPerRow *
++		    sweet_div_up(s->height, s->elementHeight));
++		bool ok = s->planeCount == 0 && addr != 0 && len <= SWEET_SURFACE_MAX_ALLOC;
++		IOMemoryDescriptor *md = ok ? IOMemoryDescriptor::withAddressRange(start, len, kIODirectionInOut, fTask) : NULL;
++		if (md != NULL && md->prepare() != kIOReturnSuccess) {
++			/* CA's image bitmaps are often read-only: wire them for reading */
++			OSSafeReleaseNULL(md);
++			md = IOMemoryDescriptor::withAddressRange(start, len, kIODirectionOut, fTask);
++			if (md != NULL && md->prepare() != kIOReturnSuccess) {
++				OSSafeReleaseNULL(md);
++			}
++			s->readOnly = md != NULL;
++		}
++		if (md == NULL) {
++			ret = kIOReturnVMError;
++		} else {
++			s->memory = md;
++			s->clientMemory = true;
++			s->mapCache = kIOMapDefaultCache;
++			s->offset = (uint32_t)(addr - start);
++			s->allocSize = (uint32_t)len;
++			if (!sweet_surface_publish(s)) {
++				ret = kIOReturnNoResources;
++			}
++		}
++	} else
 +#if defined(MIDO_BOARD)
 +	if (ret == kIOReturnSuccess && mido_surface_from_pool(s)) {
 +		if (!sweet_surface_publish(s)) {
@@ -2184,6 +2296,31 @@ index 7f90c56..5558ccd 100644
  	if (ret == kIOReturnSuccess) {
  		IOBufferMemoryDescriptor *mem = NULL;
  		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+@@ -772,6 +898,11 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		sweet_surf_log_once("sel", selector);
+ 		return kIOReturnSuccess;
+ 	}
++	case 6:                 /* wrap client image (CA's GLES renderer) */
++	case 7:                 /* wrap client memory */
++		/* Refuse: the library returns NULL and CA uploads instead. */
++		sweet_surf_log_once("sel", selector);
++		return kIOReturnUnsupported;
+ 	default:
+ 		/* Values, notifications, ownership, timestamps...: accept and ignore. */
+ 		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index fbcdfac..41be9ea 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -39,6 +39,8 @@ public:
+ 	IOOptionBits              mapCache;     /* cache mode for user mappings */
+ 	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
+ 	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
++	bool                      clientMemory; /* the creator's pages (IOSurfaceAddress), prepared */
++	bool                      readOnly;     /* ...from a read-only mapping: mapped read-only */
+ 
+ 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index 27bc49d..f65cf5e 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp

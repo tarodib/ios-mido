@@ -1872,6 +1872,42 @@ edit(SURF,
 edit(SURF,
      '\tret = sweet_surface_layout(s, props);\n\tif (ret == kIOReturnSuccess) {\n',
      '\tret = sweet_surface_layout(s, props);\n'
+     # IOSurfaceAddress: from ios-sailfish patch 0157 (Joran Vancoillie), with permission
+     '\tOSNumber *address = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAddress"));\n'
+     '\tif (ret == kIOReturnSuccess && address != NULL) {\n'
+     '\t\t/* the creator\'s memory: whole pages from the one holding the address */\n'
+     '\t\tuint64_t addr = address->unsigned64BitValue(), start = trunc_page_64(addr);\n'
+     '\t\t/* its rows as they are: no GPU alignment (eagl.c copies unaligned ones) */\n'
+     '\t\tuint32_t bpr = sweet_dict_u32(props, "IOSurfaceBytesPerRow", 0);\n'
+     '\t\tif (bpr >= (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {\n'
+     '\t\t\ts->bytesPerRow = bpr;\n'
+     '\t\t}\n'
+     '\t\tuint64_t len = round_page_64((addr - start) + (uint64_t)s->bytesPerRow *\n'
+     '\t\t    sweet_div_up(s->height, s->elementHeight));\n'
+     '\t\tbool ok = s->planeCount == 0 && addr != 0 && len <= SWEET_SURFACE_MAX_ALLOC;\n'
+     '\t\tIOMemoryDescriptor *md = ok ? IOMemoryDescriptor::withAddressRange(start, len, kIODirectionInOut, fTask) : NULL;\n'
+     '\t\tif (md != NULL && md->prepare() != kIOReturnSuccess) {\n'
+     '\t\t\t/* CA\'s image bitmaps are often read-only: wire them for reading */\n'
+     '\t\t\tOSSafeReleaseNULL(md);\n'
+     '\t\t\tmd = IOMemoryDescriptor::withAddressRange(start, len, kIODirectionOut, fTask);\n'
+     '\t\t\tif (md != NULL && md->prepare() != kIOReturnSuccess) {\n'
+     '\t\t\t\tOSSafeReleaseNULL(md);\n'
+     '\t\t\t}\n'
+     '\t\t\ts->readOnly = md != NULL;\n'
+     '\t\t}\n'
+     '\t\tif (md == NULL) {\n'
+     '\t\t\tret = kIOReturnVMError;\n'
+     '\t\t} else {\n'
+     '\t\t\ts->memory = md;\n'
+     '\t\t\ts->clientMemory = true;\n'
+     '\t\t\ts->mapCache = kIOMapDefaultCache;\n'
+     '\t\t\ts->offset = (uint32_t)(addr - start);\n'
+     '\t\t\ts->allocSize = (uint32_t)len;\n'
+     '\t\t\tif (!sweet_surface_publish(s)) {\n'
+     '\t\t\t\tret = kIOReturnNoResources;\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t} else\n'
      '#if defined(MIDO_BOARD)\n'
      '\tif (ret == kIOReturnSuccess && mido_surface_from_pool(s)) {\n'
      '\t\tif (!sweet_surface_publish(s)) {\n'
@@ -1899,6 +1935,68 @@ edit(SURF,
      '}\n'
      '#endif\n\n'
      'IOReturn\nIOSurfaceRootUserClient::create(IOExternalMethodArguments *args)\n')
+
+# From ios-sailfish patches 0152 and 0157 (Joran Vancoillie), with permission: refuse wrapping
+# client memory (faking success leaves IOSurface clients with no memory: backboardd NULL+0x30
+# in IOSurfaceClientGetBulkAttachments), and release/map client-backed surfaces properly.
+edit(SURF,
+     '\tdefault:\n\t\t/* Values, notifications, ownership, timestamps...: accept and ignore. */\n',
+     '\tcase 6:                 /* wrap client image (CA\'s GLES renderer) */\n'
+     '\tcase 7:                 /* wrap client memory */\n'
+     '\t\t/* Refuse: the library returns NULL and CA uploads instead. */\n'
+     '\t\tsweet_surf_log_once("sel", selector);\n'
+     '\t\treturn kIOReturnUnsupported;\n'
+     '\tdefault:\n\t\t/* Values, notifications, ownership, timestamps...: accept and ignore. */\n')
+edit(SURF,
+     '\tOSSafeReleaseNULL(kernelMap);\n\tOSSafeReleaseNULL(memory);\n',
+     '\tOSSafeReleaseNULL(kernelMap);\n'
+     '\tif (clientMemory && memory != NULL) {\n'
+     '\t\tmemory->complete();\n'
+     '\t}\n'
+     '\tOSSafeReleaseNULL(memory);\n')
+edit(SURF,
+     '\t\tkernelMap = memory->map(kIOMapWriteCombineCache);\n\t}\n\tIOLockUnlock(sweet_surface_lock);\n',
+     '\t\tkernelMap = memory->map(mapCache | (readOnly ? kIOMapReadOnly : 0));\n\t}\n\tIOLockUnlock(sweet_surface_lock);\n')
+edit(SURF,
+     '\tref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);\n',
+     '\tref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache |\n'
+     '\t    (s->readOnly ? kIOMapReadOnly : 0));\n')
+edit('iokit/Kernel/arm/SweetSurface.h',
+     '\tIOMemoryMap              *kernelMap;    /* lazily created for kernel copies */\n',
+     '\tIOMemoryMap              *kernelMap;    /* lazily created for kernel copies */\n'
+     '\tbool                      clientMemory; /* the creator\'s pages (IOSurfaceAddress), prepared */\n'
+     '\tbool                      readOnly;     /* ...from a read-only mapping: mapped read-only */\n')
+# Row bytes, from ios-sailfish patches 0153/0160/0162: the A5xx pitch needs 64-byte rows and CA
+# reads the real value back; bare requests (6 keys or fewer: CoreUI glyphs) get what they asked.
+edit(SURF,
+     'sweet_row_bytes(uint32_t width, uint32_t ew, uint32_t bpe)\n{\n'
+     '\tuint64_t row = (uint64_t)sweet_div_up(width, ew) * bpe;\n'
+     '\treturn (uint32_t)((row + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint64_t)(SWEET_SURFACE_ROW_ALIGN - 1));\n'
+     '}\n',
+     'sweet_row_align(uint64_t row)\n{\n'
+     '\treturn (uint32_t)((row + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint64_t)(SWEET_SURFACE_ROW_ALIGN - 1));\n'
+     '}\n\n'
+     'static uint32_t\n'
+     'sweet_row_bytes(uint32_t width, uint32_t ew, uint32_t bpe)\n{\n'
+     '\treturn sweet_row_align((uint64_t)sweet_div_up(width, ew) * bpe);\n'
+     '}\n\n'
+     'static uint32_t\n'
+     'sweet_rows(uint32_t asked, uint32_t width, uint32_t ew, uint32_t bpe, unsigned int keys)\n{\n'
+     '\tif (asked == 0) {\n'
+     '\t\treturn sweet_row_bytes(width, ew, bpe);\n'
+     '\t}\n'
+     '\treturn keys <= 6 ? asked : sweet_row_align(asked);\n'
+     '}\n')
+edit(SURF,
+     '\ts->bytesPerRow = sweet_dict_u32(props, "IOSurfaceBytesPerRow",\n'
+     '\t    sweet_row_bytes(s->width, s->elementWidth, s->bytesPerElement));\n',
+     '\ts->bytesPerRow = sweet_rows(sweet_dict_u32(props, "IOSurfaceBytesPerRow", 0),\n'
+     '\t    s->width, s->elementWidth, s->bytesPerElement, props->getCount());\n')
+edit(SURF,
+     '\t\t\tp->bytesPerRow = sweet_dict_u32(pd, "IOSurfacePlaneBytesPerRow",\n'
+     '\t\t\t    sweet_row_bytes(p->width, p->elementWidth, p->bytesPerElement));\n',
+     '\t\t\tp->bytesPerRow = sweet_rows(sweet_dict_u32(pd, "IOSurfacePlaneBytesPerRow", 0),\n'
+     '\t\t\t    p->width, p->elementWidth, p->bytesPerElement, props->getCount());\n')
 
 if failures:
     print('MIDO EDIT FAILURES:')

@@ -59,7 +59,10 @@ def product_props(path):
     root, _ = adt.parse(open(path, 'rb').read())
     for c in root.children:
         if dict((k, v) for k, f, v in c.props).get('name') == b'product\0':
-            return [(k, v) for k, f, v in c.props if not f and k not in ('name', 'AAPL,phandle')]
+            # The panel is not P3. With "P3" backboardd asks for a deep-colour b3a8 framebuffer,
+            # which the GL layer cannot attach (same fix as ios-sailfish's mkadt.py).
+            return [(k, b'sRGB\0' if k in ('artwork-display-gamut', 'display-gamut') else v)
+                    for k, f, v in c.props if not f and k not in ('name', 'AAPL,phandle')]
     raise SystemExit(f'{path}: no /product node')
 
 

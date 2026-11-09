@@ -948,3 +948,17 @@ on the phone. What it took after stage 2 (in order of discovery):
 - Kernel: IOSurfaces are allocated from the GPU pool (0x99400000-0x9ff00000, write-combined),
   falling back to wired memory when it is full. MidoGPU selector 6 returns a surface's GPU
   address and size. GPU thread delay reduced from 20 s to 3 s.
+
+### GPU step 4b/4c: first boots (2026-11-09)
+- gpu8 (kernel run 42529842123, midogl mesa-run8): GPU READY, backboardd created an EAGLContext on
+  Mesa. Crash loop: `attachImage: surface b3a8 ... format failed`, because the D211AP /product
+  says P3 and backboardd picks a deep-colour framebuffer. QuartzCore differs from sailfish's build,
+  so the texture function patches were skipped by the new probe (effects may be wrong).
+- gpu9 (device tree artwork-display-gamut = sRGB): framebuffer is BGRA. CoreAnimation's GL renderer
+  runs (render_contents_background), then crashes at NULL+0x30: `__platform_memmove` <-
+  `IOSurfaceClientGetBulkAttachments` <- `CA::Render::iosurface_get_edr_factor` <-
+  `WindowServer::IOSurface::wrap_buffer` <- `GLESContext::retain_image`. Cause: IOSurface sel 6
+  (wrap client image) was faked as success, leaving a client with no memory.
+- Fix, adapted from ios-sailfish by Joran Vancoillie with the author's permission (patches 0152,
+  0153, 0157-0160, 0162): refuse sel 6/7, IOSurfaceAddress client-memory surfaces (read-only
+  fallback), 64-byte row rules. Not yet booted.

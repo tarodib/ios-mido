@@ -1960,7 +1960,6 @@ edit(FB,
      '\t\treturn;\n'
      '\t}\n'
      '#endif\n')
-')
 
 # ---------------------------------------------------------------------------
 # GPU step 4: IOSurfaces live in the GPU pool (physically contiguous, GPU address =

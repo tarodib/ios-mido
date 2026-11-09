@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..8e4dda9 100644
+index a62416c..aa136bd 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -1980,7 +1980,28 @@ index a62416c..8e4dda9 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -359,6 +390,15 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -206,10 +237,20 @@ AppleCLCD::start(IOService *provider)
+ 	return true;
+ }
+ 
++#if defined(MIDO_BOARD)
++static bool mido_mdp_busy(void);
++#endif
++
+ void
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
++#if defined(MIDO_BOARD)
++	if (mido_mdp_busy()) {
++		sender->setTimeoutUS(1000);
++		return;
++	}
++#endif
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
+ 	uint64_t values[6] = {
+@@ -359,6 +400,15 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -1996,7 +2017,7 @@ index a62416c..8e4dda9 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +441,209 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +451,221 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -2019,6 +2040,18 @@ index a62416c..8e4dda9 100644
 +#define MDP_R(o)    (*(volatile uint32_t *)(mido_mdp + (o)))
 +#define VIG0 0x5000u
 +#define CTL0 0x2000u
++
++/* True while a flip is still waiting for the panel vsync (at most about 3 frames). */
++static bool
++mido_mdp_busy(void)
++{
++	static uint32_t waited;
++	if (mido_mdp == 0 || !mido_mdp_staged || !(MDP_R(CTL0 + 0x18) & 1u) || ++waited > 50) {
++		waited = 0;
++		return false;
++	}
++	return true;
++}
 +
 +static void
 +mido_mdp_unstage(void)

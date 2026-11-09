@@ -971,3 +971,18 @@ on the phone. What it took after stage 2 (in order of discovery):
 - Pool moved to 0x50000000-0x70000000 (512 MB, below every carve-out). Not yet booted.
 - Still open: QuartzCore texture function patches need addresses for this iOS build (blur/material
   rendering); CPU-side and display-path speed.
+
+### Panel copy speed (2026-11-09)
+- gpu11 (512 MB pool): 0 `BONew` failures (was 269). Visuals unchanged, so the failures were not
+  the cause of the flat dock / blur.
+- gpu12 (kernel run 42664476104): pool surfaces read through a cached kernel view, flushed before
+  each copy. User: noticeably faster, image breaks up on fast scrolls. Measured: flush about 1 ms,
+  CPU downscale 12-14 ms per 1242x2208 frame. Panel copy was still every 4th vsync (15 Hz).
+- `sweetfb_hz=60` (gpu14): apps started (exec Preferences, MobileSMS, no crash, no disk errors) but
+  did not appear. `sweetfb_hz=30` (gpu13, otherwise identical): apps open. One A/B test: consistent
+  with the copy starving the CPU at 60 Hz, not proven. **Use 30 Hz.** "trying to set state of nil
+  layer" is logged in both, so it is not the difference.
+- Correction: the A5xx 2D blit in Mesa rejects scaled copies, so the kernel blit cannot replace the
+  downscale directly. Options: 3D-engine scale in backboardd through Mesa + buffer flip, MDP VIG
+  pipe scaler, or a native 1080x1920 canvas. Also open: memory bus vote, GPLL3 GPU clocks, and the
+  QuartzCore texture function addresses for this iOS build (dock/blur).

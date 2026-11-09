@@ -992,3 +992,24 @@ on the phone. What it took after stage 2 (in order of discovery):
   bimc_clk through the GCC debug mux (selector 0x15a): **931 MHz before and 931 MHz after**. DDR was
   already at its maximum after LK, so the assumption that it was slow was wrong. CPU copy time did
   not change (13-14 ms). The vote is no longer called; `rpm_ddr_max()` stays in the shim, unused.
+
+### Zero-copy display through the MDP VIG0 scaler (2026-11-09)
+- Boot-arg `mido_mdp`: instead of the CPU downscale, MDP pipe VIG0 (the only pipe with a scaler)
+  fetches iOS's 1242x2208 framebuffer IOSurface straight from the GPU pool and scales it to the
+  1080x1920 panel; LM0 shows VIG0 where LK's RGB0 was. 1 = scaled, 2 = LK buffer unscaled,
+  3 = GPU memory unscaled (cropped). Programming from Linux disp/mdp5 (mdp5_plane.c) for MSM8953.
+- Mode 2 and 3 displayed at once. Mode 1 was blue (the INTF underflow colour); the log showed
+  INTF1 underrun on every frame (MDP INTR_STATUS 0x0c000000) with mdp_clk at 320 MHz
+  (RCG cfg 0x104, GPLL0/2.5), so the clock was ruled out. Width-only scaling was also blue.
+  Cause: only the component 0/3 phase steps (+0x210/+0x214) were set; the component 1/2 steps
+  (+0x218/+0x21c) stayed 0, that half of the scaler never advanced. Fixed in 9c5be3a (also
+  component 1/2 filter bits in SCALE_CONFIG).
+- Tearing (mode 3, user photo: diagonal jag, washed-out lower half): iOS rotates **two** buffers
+  (log: 50c6c000 / 50028000 alternating) and draws into the other one as soon as a swap returns,
+  i.e. into the buffer still on screen. Holding back the vsync notification until the flip latched
+  (0421ee9) did not help. b6a33d4: SwapEnd flips immediately and does not return until the MDP
+  flush bit clears (the panel has left the old buffer). User: no jagged lines.
+- crx-bil (kernel 9c5be3a, run 42711362851; `mido_mdp=1 mido_mdp_filter=1 sweetfb_hz=60`):
+  **full scaled picture, booted without problems, feels about 30 Hz or a bit lower.** No CPU copy
+  remains in the display path. Next: find why it is about 30 Hz (frame render time vs. the 60 Hz
+  software vsync timer drifting against the real panel vsync).

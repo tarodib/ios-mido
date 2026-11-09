@@ -13,10 +13,10 @@ index 6630131..5b98298 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/mido_gpu.c b/bsd/dev/mido_gpu.c
 new file mode 100644
-index 0000000..0ad4139
+index 0000000..df82edd
 --- /dev/null
 +++ b/bsd/dev/mido_gpu.c
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,660 @@
 +/*
 + * mido (Redmi Note 4, MSM8953) Adreno 506 bring-up inside XNU, step 1 of GPU acceleration.
 + *
@@ -525,12 +525,19 @@ index 0000000..0ad4139
 +}
 +
 +/* Returns the fence sequence number, or 0 if the GPU is not ready / the ring is stuck. */
++void mido_fb_gpu_gate(void);           /* SweetFramebuffer.cpp */
 +uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
 +uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords)
 +{
 +	if (!g_ready || dwords == 0 || dwords > 0xfffff) {
 +		return 0;
 +	}
++	/*
++	 * Zero-copy display: iOS draws into the buffer the panel may still be showing (two
++	 * buffers). The CPU may build the frame meanwhile; only the GPU must not write to it
++	 * before the previous flip has latched (SweetFramebuffer, boot-arg mido_mdp_hold).
++	 */
++	mido_fb_gpu_gate();
 +	lck_mtx_lock(&mido_gpu_mtx);
 +	for (unsigned i = 0; i < 2000; i++) {               /* room for 20 dwords, up to 2 s */
 +		uint32_t used = (g_wptr + RING_DW - gr(0x0806)) % RING_DW;
@@ -1914,7 +1921,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..3a0ece3 100644
+index a62416c..d220321 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -2005,7 +2012,7 @@ index a62416c..3a0ece3 100644
  	uint64_t now = mach_absolute_time();
  	uint64_t count = ++fb->fVsyncCount;
  	uint64_t values[6] = {
-@@ -299,6 +344,38 @@ static uint64_t sweet_fb_swap_count;
+@@ -299,6 +344,40 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -2015,7 +2022,9 @@ index a62416c..3a0ece3 100644
 +		static uint64_t st_n, st_wait, st_wait_max, st_gap_max, st_last, st_win;
 +		uint64_t t0 = mach_absolute_time();
 +		present(rec);
-+		mido_mdp_wait_latch();
++		if (mido_mdp_hold_mode() == 1) {
++			mido_mdp_wait_latch();
++		}
 +		uint64_t t1 = mach_absolute_time(), ns;
 +		absolutetime_to_nanoseconds(t1 - t0, &ns);
 +		st_n++;
@@ -2044,7 +2053,7 @@ index a62416c..3a0ece3 100644
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
-@@ -359,6 +436,15 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -359,6 +438,15 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -2060,7 +2069,7 @@ index a62416c..3a0ece3 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +487,253 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +489,275 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -2108,6 +2117,28 @@ index a62416c..3a0ece3 100644
 +{
 +	for (int i = 0; i < 40 && mido_mdp_active() && (MDP_R(CTL0 + 0x18) & 1u); i++) {
 +		IOSleep(1);
++	}
++}
++
++/* Where iOS waits for the latch: 1 = in SwapEnd, 2 = before each GPU submit (default). */
++static uint32_t mido_mdp_hold = 0;
++static uint32_t
++mido_mdp_hold_mode(void)
++{
++	if (mido_mdp_hold == 0) {
++		uint32_t v = 2;
++		PE_parse_boot_argn("mido_mdp_hold", &v, sizeof(v));
++		mido_mdp_hold = v == 1 ? 1 : 2;
++	}
++	return mido_mdp_hold;
++}
++
++extern "C" void mido_fb_gpu_gate(void);
++extern "C" void
++mido_fb_gpu_gate(void)
++{
++	if (mido_mdp_active() && mido_mdp_hold_mode() == 2) {
++		mido_mdp_wait_latch();
 +	}
 +}
 +

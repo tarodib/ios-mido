@@ -506,12 +506,19 @@ static void ring_put(uint32_t v)
 }
 
 /* Returns the fence sequence number, or 0 if the GPU is not ready / the ring is stuck. */
+void mido_fb_gpu_gate(void);           /* SweetFramebuffer.cpp */
 uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords);
 uint32_t mido_gpu_submit(uint64_t ib, uint32_t dwords)
 {
 	if (!g_ready || dwords == 0 || dwords > 0xfffff) {
 		return 0;
 	}
+	/*
+	 * Zero-copy display: iOS draws into the buffer the panel may still be showing (two
+	 * buffers). The CPU may build the frame meanwhile; only the GPU must not write to it
+	 * before the previous flip has latched (SweetFramebuffer, boot-arg mido_mdp_hold).
+	 */
+	mido_fb_gpu_gate();
 	lck_mtx_lock(&mido_gpu_mtx);
 	for (unsigned i = 0; i < 2000; i++) {               /* room for 20 dwords, up to 2 s */
 		uint32_t used = (g_wptr + RING_DW - gr(0x0806)) % RING_DW;

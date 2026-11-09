@@ -986,3 +986,9 @@ on the phone. What it took after stage 2 (in order of discovery):
   downscale directly. Options: 3D-engine scale in backboardd through Mesa + buffer flip, MDP VIG
   pipe scaler, or a native 1080x1920 canvas. Also open: memory bus vote, GPLL3 GPU clocks, and the
   QuartzCore texture function addresses for this iOS build (dock/blur).
+
+### Memory bus vote: not needed (2026-11-09)
+- gpu15: RPM votes for bimc/noc clocks + scaling on, modelled on Linux clock-gcc-8953.c. Measured
+  bimc_clk through the GCC debug mux (selector 0x15a): **931 MHz before and 931 MHz after**. DDR was
+  already at its maximum after LK, so the assumption that it was slow was wrong. CPU copy time did
+  not change (13-14 ms). The vote is no longer called; `rpm_ddr_max()` stays in the shim, unused.

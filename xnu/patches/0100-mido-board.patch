@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..a857120 100644
+index a62416c..8e4dda9 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -1996,7 +1996,7 @@ index a62416c..a857120 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +441,202 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +441,209 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -2013,6 +2013,7 @@ index a62416c..a857120 100644
 +static vm_offset_t mido_mdp;
 +static int mido_mdp_mode = -1;
 +static bool mido_mdp_staged;
++static uint32_t mido_mdp_filter = 2, mido_mdp_axes = 3, mido_mdp_pe = 1;   /* boot-args */
 +static uint32_t mido_mdp_flips, mido_mdp_cfg_w, mido_mdp_cfg_h;
 +#define MDP_W(o, v) (*(volatile uint32_t *)(mido_mdp + (o)) = (v))
 +#define MDP_R(o)    (*(volatile uint32_t *)(mido_mdp + (o)))
@@ -2036,6 +2037,10 @@ index a62416c..a857120 100644
 +		int on = 0;
 +		PE_parse_boot_argn("mido_mdp", &on, sizeof(on));
 +		mido_mdp_mode = on;
++		PE_parse_boot_argn("mido_mdp_filter", &mido_mdp_filter, sizeof(mido_mdp_filter));
++		PE_parse_boot_argn("mido_mdp_axes", &mido_mdp_axes, sizeof(mido_mdp_axes));
++		PE_parse_boot_argn("mido_mdp_pe", &mido_mdp_pe, sizeof(mido_mdp_pe));
++		IOLog("MIDO MDP: filter %u axes %u pixel-ext %u\n", mido_mdp_filter, mido_mdp_axes, mido_mdp_pe);
 +		mido_mdp = on ? ml_io_map(0x01a00000, 0x10000) : 0;
 +		if (mido_mdp) {
 +			uint32_t ck = MDP_R(0x2ac);
@@ -2056,7 +2061,9 @@ index a62416c..a857120 100644
 +	}
 +	if (!mido_mdp_staged || mido_mdp_cfg_w != (uint32_t)w || mido_mdp_cfg_h != (uint32_t)h) {
 +		bool scale = mido_mdp_mode == 1;
-+		uint32_t cw = scale ? (uint32_t)w : panelw, ch = scale ? (uint32_t)h : panelh;
++		bool sx_on = scale && (mido_mdp_axes & 1), sy_on = scale && (mido_mdp_axes & 2);
++		uint32_t cw = sx_on ? (uint32_t)w : panelw, ch = sy_on ? (uint32_t)h : panelh;
++		uint32_t f = mido_mdp_filter & 3;
 +		uint32_t size = (ch << 16) | cw;
 +		MDP_W(VIG0 + 0x00, size);                   /* SRC_SIZE */
 +		MDP_W(VIG0 + 0x04, size);                   /* SRC_IMG_SIZE */
@@ -2066,18 +2073,18 @@ index a62416c..a857120 100644
 +		MDP_W(VIG0 + 0x28, 0);                      /* STRIDE_B */
 +		MDP_W(VIG0 + 0x30, 0x000236ff);             /* format: as LK RGB0 at 32 bpp */
 +		MDP_W(VIG0 + 0x34, 0x03020001);             /* unpack B, G, R, X */
-+		MDP_W(VIG0 + 0x38, 0x80000000u);            /* SRC_OP_MODE: SW_PIX_EXT_OVERRIDE */
++		MDP_W(VIG0 + 0x38, mido_mdp_pe ? 0x80000000u : 0u);   /* SRC_OP_MODE: SW_PIX_EXT_OVERRIDE */
 +		MDP_W(VIG0 + 0xb4, 0);                      /* DECIMATION */
 +		MDP_W(VIG0 + 0x200, 0);                     /* OP_MODE: no CSC */
-+		MDP_W(VIG0 + 0x204, scale ? 0x000a0a03u : 0u); /* scale X+Y, PCMN on comps 0 and 3 */
++		MDP_W(VIG0 + 0x204, (sx_on ? 1u | (f << 8) | (f << 16) : 0u) | (sy_on ? 2u | (f << 10) | (f << 18) : 0u));
 +		MDP_W(VIG0 + 0x210, (uint32_t)(((uint64_t)cw << 21) / panelw));
 +		MDP_W(VIG0 + 0x214, (uint32_t)(((uint64_t)ch << 21) / panelh));
 +		MDP_W(VIG0 + 0x220, 0);
 +		MDP_W(VIG0 + 0x224, 0);
 +		for (uint32_t c = 0; c < 3; c++) {          /* SW_PIX_EXT comps 0, 1/2, 3 */
-+			MDP_W(VIG0 + 0x100 + c * 0x10, scale ? 1u << 16 : 0u);    /* LR: 1 right repeat */
-+			MDP_W(VIG0 + 0x104 + c * 0x10, scale ? 1u << 16 : 0u);    /* TB: 1 bottom repeat */
-+			MDP_W(VIG0 + 0x108 + c * 0x10, ((ch + (scale ? 1 : 0)) << 16) | (cw + (scale ? 1 : 0)));
++			MDP_W(VIG0 + 0x100 + c * 0x10, sx_on && mido_mdp_pe ? 1u << 16 : 0u);    /* LR: 1 right repeat */
++			MDP_W(VIG0 + 0x104 + c * 0x10, sy_on && mido_mdp_pe ? 1u << 16 : 0u);    /* TB: 1 bottom repeat */
++			MDP_W(VIG0 + 0x108 + c * 0x10, ((ch + (sy_on && mido_mdp_pe ? 1 : 0)) << 16) | (cw + (sx_on && mido_mdp_pe ? 1 : 0)));
 +		}
 +		mido_mdp_cfg_w = (uint32_t)w;
 +		mido_mdp_cfg_h = (uint32_t)h;

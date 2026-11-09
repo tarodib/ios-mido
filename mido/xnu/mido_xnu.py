@@ -1466,6 +1466,7 @@ edit(FB,
 edit(FB,
      'bool\nIOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)\n',
      '#if defined(MIDO_BOARD)\n'
+     'extern "C" void flush_dcache(vm_offset_t addr, unsigned count, int phys);\n'
      '/*\n'
      ' * Copy canvas rect (sx,sy)+(w,h) shown at canvas (dx,dy) into the panel,\n'
      ' * nearest neighbour: panel pixel p shows canvas pixel p * canvas / panel.\n'
@@ -1498,6 +1499,12 @@ edit(FB,
      '\t\treturn;\n'
      '\t}\n'
      '\tuintptr_t base = s->kernelAddress() + s->offset;\n'
+     '\tuint64_t mido_t0 = mach_absolute_time();\n'
+     '\tif (s->mapCache == kIOMapWriteCombineCache && base != s->offset) {\n'
+     '\t\t/* GPU memory read through a cached view: drop stale lines first */\n'
+     '\t\tflush_dcache((vm_offset_t)(base + (uint64_t)sy * s->bytesPerRow), (unsigned)((uint64_t)h * s->bytesPerRow), FALSE);\n'
+     '\t}\n'
+     '\tuint64_t mido_t1 = mach_absolute_time();\n'
      '\tuint32_t stepx = (fLogicalW << 16) / fWidth, stepy = (fLogicalH << 16) / fHeight;\n'
      '\t/*\n'
      '\t * backboardd renders the D211 (P3 wide colour) UI in kCVPixelFormatType_30RGBLE_8A\n'
@@ -1541,6 +1548,17 @@ edit(FB,
      '\t\t\t\tdrow[px] = v;\n'
      '\t\t\t}\n'
      '\t\t}\n'
+     '\t}\n'
+     '\tstatic uint32_t mido_n;\n'
+     '\tstatic uint64_t mido_flush, mido_copy;\n'
+     '\tuint64_t mido_t2 = mach_absolute_time();\n'
+     '\tmido_flush += mido_t1 - mido_t0;\n'
+     '\tmido_copy += mido_t2 - mido_t1;\n'
+     '\tif (++mido_n == 120) {\n'
+     '\t\tIOLog("MIDO FB: %d x %d copy avg flush %llu us, copy %llu us (cached %d)\\n", w, h,\n'
+     '\t\t    mido_flush * 10 / 192 / mido_n, mido_copy * 10 / 192 / mido_n, s->mapCache == kIOMapWriteCombineCache);\n'
+     '\t\tmido_n = 0;\n'
+     '\t\tmido_flush = mido_copy = 0;\n'
      '\t}\n'
      '}\n'
      '#endif\n'
@@ -1956,7 +1974,14 @@ edit(SURF,
      '\tOSSafeReleaseNULL(memory);\n')
 edit(SURF,
      '\t\tkernelMap = memory->map(kIOMapWriteCombineCache);\n\t}\n\tIOLockUnlock(sweet_surface_lock);\n',
-     '\t\tkernelMap = memory->map(mapCache | (readOnly ? kIOMapReadOnly : 0));\n\t}\n\tIOLockUnlock(sweet_surface_lock);\n')
+     '#if defined(MIDO_BOARD)\n'
+     '\t\t/* pool surfaces: cached kernel view, the panel copy flushes it per frame */\n'
+     '\t\tkernelMap = memory->map(mido_surface_pa(this) != 0 ? kIOMapCopybackCache :\n'
+     '\t\t    (mapCache | (readOnly ? kIOMapReadOnly : 0)));\n'
+     '#else\n'
+     '\t\tkernelMap = memory->map(mapCache | (readOnly ? kIOMapReadOnly : 0));\n'
+     '#endif\n'
+     '\t}\n\tIOLockUnlock(sweet_surface_lock);\n')
 edit(SURF,
      '\tref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);\n',
      '\tref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache |\n'

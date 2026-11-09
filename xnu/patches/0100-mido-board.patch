@@ -1914,7 +1914,7 @@ index 2545cf9..9099496 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..9c89b65 100644
+index a62416c..e9810d9 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -68,7 +68,12 @@ enum {
@@ -1996,11 +1996,12 @@ index a62416c..9c89b65 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +441,86 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +441,104 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
 +#if defined(MIDO_BOARD)
++extern "C" void flush_dcache(vm_offset_t addr, unsigned count, int phys);
 +/*
 + * Copy canvas rect (sx,sy)+(w,h) shown at canvas (dx,dy) into the panel,
 + * nearest neighbour: panel pixel p shows canvas pixel p * canvas / panel.
@@ -2033,6 +2034,12 @@ index a62416c..9c89b65 100644
 +		return;
 +	}
 +	uintptr_t base = s->kernelAddress() + s->offset;
++	uint64_t mido_t0 = mach_absolute_time();
++	if (s->mapCache == kIOMapWriteCombineCache && base != s->offset) {
++		/* GPU memory read through a cached view: drop stale lines first */
++		flush_dcache((vm_offset_t)(base + (uint64_t)sy * s->bytesPerRow), (unsigned)((uint64_t)h * s->bytesPerRow), FALSE);
++	}
++	uint64_t mido_t1 = mach_absolute_time();
 +	uint32_t stepx = (fLogicalW << 16) / fWidth, stepy = (fLogicalH << 16) / fHeight;
 +	/*
 +	 * backboardd renders the D211 (P3 wide colour) UI in kCVPixelFormatType_30RGBLE_8A
@@ -2077,6 +2084,17 @@ index a62416c..9c89b65 100644
 +			}
 +		}
 +	}
++	static uint32_t mido_n;
++	static uint64_t mido_flush, mido_copy;
++	uint64_t mido_t2 = mach_absolute_time();
++	mido_flush += mido_t1 - mido_t0;
++	mido_copy += mido_t2 - mido_t1;
++	if (++mido_n == 120) {
++		IOLog("MIDO FB: %d x %d copy avg flush %llu us, copy %llu us (cached %d)\n", w, h,
++		    mido_flush * 10 / 192 / mido_n, mido_copy * 10 / 192 / mido_n, s->mapCache == kIOMapWriteCombineCache);
++		mido_n = 0;
++		mido_flush = mido_copy = 0;
++	}
 +}
 +#endif
 +
@@ -2084,7 +2102,7 @@ index a62416c..9c89b65 100644
  IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
  {
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 7f90c56..0eaf268 100644
+index 7f90c56..fec7197 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -77,13 +77,65 @@ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
@@ -2153,16 +2171,22 @@ index 7f90c56..0eaf268 100644
  	OSSafeReleaseNULL(memory);
  	OSSafeReleaseNULL(state);
  	OSObject::free();
-@@ -98,7 +150,7 @@ SweetSurface::kernelAddress()
+@@ -98,7 +150,13 @@ SweetSurface::kernelAddress()
  	}
  	IOLockLock(sweet_surface_lock);
  	if (kernelMap == NULL && memory != NULL) {
 -		kernelMap = memory->map(kIOMapWriteCombineCache);
++#if defined(MIDO_BOARD)
++		/* pool surfaces: cached kernel view, the panel copy flushes it per frame */
++		kernelMap = memory->map(mido_surface_pa(this) != 0 ? kIOMapCopybackCache :
++		    (mapCache | (readOnly ? kIOMapReadOnly : 0)));
++#else
 +		kernelMap = memory->map(mapCache | (readOnly ? kIOMapReadOnly : 0));
++#endif
  	}
  	IOLockUnlock(sweet_surface_lock);
  	return kernelMap != NULL ? (uintptr_t)kernelMap->getVirtualAddress() : 0;
-@@ -270,12 +322,26 @@ sweet_div_up(uint32_t a, uint32_t b)
+@@ -270,12 +328,26 @@ sweet_div_up(uint32_t a, uint32_t b)
  }
  
  static uint32_t
@@ -2191,7 +2215,7 @@ index 7f90c56..0eaf268 100644
  /* Geometry from the creation properties (IOSurface.h keys). */
  static IOReturn
  sweet_surface_layout(SweetSurface *s, OSDictionary *props)
-@@ -294,8 +360,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+@@ -294,8 +366,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
  	    s->bytesPerElement > 64 || s->elementWidth == 0 || s->elementHeight == 0) {
  		return kIOReturnBadArgument;
  	}
@@ -2202,7 +2226,7 @@ index 7f90c56..0eaf268 100644
  	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
  		return kIOReturnBadArgument;
  	}
-@@ -323,8 +389,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+@@ -323,8 +395,8 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
  			    p->bytesPerElement > 64 || p->elementWidth == 0 || p->elementHeight == 0) {
  				return kIOReturnBadArgument;
  			}
@@ -2213,7 +2237,7 @@ index 7f90c56..0eaf268 100644
  			p->offset = sweet_dict_u32(pd, "IOSurfacePlaneOffset", (uint32_t)next);
  			p->size = sweet_dict_u32(pd, "IOSurfacePlaneSize",
  			    p->bytesPerRow * sweet_div_up(p->height, p->elementHeight));
-@@ -527,7 +593,8 @@ IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool
+@@ -527,7 +599,8 @@ IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool
  	s->retain();
  	ref->surface = s;
  	ref->count = 1;
@@ -2223,7 +2247,7 @@ index 7f90c56..0eaf268 100644
  	ref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);
  	if (ref->data == NULL || ref->state == NULL) {
  		ref->release();
-@@ -646,6 +713,23 @@ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArgument
+@@ -646,6 +719,23 @@ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArgument
  	return ret;
  }
  
@@ -2247,7 +2271,7 @@ index 7f90c56..0eaf268 100644
  IOReturn
  IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  {
-@@ -684,6 +768,48 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+@@ -684,6 +774,48 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  	}
  	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
  	ret = sweet_surface_layout(s, props);
@@ -2296,7 +2320,7 @@ index 7f90c56..0eaf268 100644
  	if (ret == kIOReturnSuccess) {
  		IOBufferMemoryDescriptor *mem = NULL;
  		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
-@@ -772,6 +898,11 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+@@ -772,6 +904,11 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
  		sweet_surf_log_once("sel", selector);
  		return kIOReturnSuccess;
  	}
